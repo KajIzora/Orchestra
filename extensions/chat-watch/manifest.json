@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "Orchestra Chat Watch",
+  "version": "0.3.0",
+  "description": "Syncs ChatGPT, Claude, and Gemini tab state to Orchestra for browser chat watching.",
+  "permissions": ["activeTab", "tabs", "storage", "webRequest", "debugger"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "spoofer.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "privacy-settings.js",
+        "gemini-watch-signals.js",
+        "claude-watch-signals.js",
+        "content-chatgpt.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "comment": "TEST-ONLY auto-send driver (v3-browser-driver). Always loaded but INERT unless the `taskAppChatWatchDriver` storage flag is on — its only always-on surface is a CHAT_DRIVE message listener that refuses every command while the flag is off. Chosen over a separately-gated entry so the production extension ships one manifest; the runtime flag is the gate. Runs in the ISOLATED world so it can use chrome.runtime; Gemini Quill uses the native-input path inside driver.js.",
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "driver.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Orchestra Chat Watch",
+    "default_popup": "popup.html"
+  }
+}

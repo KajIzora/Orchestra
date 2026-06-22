@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/runtime-env.json
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+launchd.out.log
+launchd.err.log
+
+# macOS
+.DS_Store

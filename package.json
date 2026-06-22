@@ -1,0 +1,45 @@
+{
+  "name": "orchestra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Orchestra — local-only macOS task tracker for parallel agent workflows.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "node server.js",
+    "desktop:dev": "electron .",
+    "desktop:build": "node electron/write-runtime-env.cjs && electron-builder --mac",
+    "desktop:pack": "node electron/write-runtime-env.cjs && electron-builder --mac --dir"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "electron": "^39.2.1",
+    "electron-builder": "^26.0.12"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "build": {
+    "appId": "com.user.orchestra",
+    "productName": "Orchestra",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg"
+      ]
+    },
+    "files": [
+      "electron/**/*",
+      "assets/**/*",
+      "build/runtime-env.json",
+      "server.js",
+      "lib/**/*",
+      "public/**/*",
+      "extensions/chat-watch/**/*",
+      "package.json"
+    ],
+    "asar": true
+  }
+}

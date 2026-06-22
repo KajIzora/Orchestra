@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd LaunchAgent for Orchestra (label unchanged for existing installs).
+
+  To install:
+    1. Copy this file to ~/Library/LaunchAgents/com.user.agenttasktracker.plist
+    2. Replace REPLACE_ME with the absolute path to this project folder.
+    3. Optional: add EnvironmentVariables entries here for values that should
+       override .env.
+    4. Load it:
+         launchctl load ~/Library/LaunchAgents/com.user.agenttasktracker.plist
+    5. Unload with:
+         launchctl unload ~/Library/LaunchAgents/com.user.agenttasktracker.plist
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.user.agenttasktracker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>REPLACE_ME/start.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>REPLACE_ME</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>REPLACE_ME/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>REPLACE_ME/launchd.err.log</string>
+  </dict>
+</plist>

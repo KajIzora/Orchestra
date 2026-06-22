@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orchestra</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js" defer></script>
+    <script src="default_launch_commands.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div id="toast" class="toast" hidden></div>
+    <div id="launch-preset-modal" class="modal-overlay" hidden>
+      <div class="modal launch-preset-modal" role="dialog" aria-labelledby="launch-preset-title" aria-modal="true">
+        <h3 id="launch-preset-title" class="modal-title">Default launch command</h3>
+        <p class="modal-hint">Choose a preset, fill fields, then insert the generated command into this row.</p>
+        <div class="launch-preset-grid">
+          <button type="button" class="ghost-button" data-launch-preset="focus_chrome">Focus chrome web page</button>
+          <button type="button" class="ghost-button" data-launch-preset="focus_cursor">Focus Cursor Project</button>
+          <button type="button" class="ghost-button" data-launch-preset="focus_remote_cursor">Focus Remote Cursor</button>
+          <button type="button" class="ghost-button" data-launch-preset="open_app">Open App</button>
+          <button type="button" class="ghost-button" data-launch-preset="open_window">Open Window</button>
+        </div>
+        <div id="launch-preset-fields" class="launch-preset-fields"></div>
+        <div class="modal-actions">
+          <button type="button" id="launch-preset-use" class="primary-button">Use command</button>
+          <button type="button" id="launch-preset-cancel" class="ghost-button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="task-focus-modal" class="modal-overlay" hidden>
+      <form class="modal task-focus-modal" role="dialog" aria-labelledby="task-focus-title" aria-modal="true">
+        <h3 id="task-focus-title" class="modal-title">Task Focus</h3>
+        <p id="task-focus-task-text" class="task-focus-task-text"></p>
+        <section class="command-section">
+          <div class="command-section-header">
+            <span class="field-label">Focus Targets</span>
+          </div>
+          <div class="workspace-item-list" data-workspace-items></div>
+          <button type="button" id="task-focus-add-command" class="ghost-button add-launch-command">
+            + Add focus target
+          </button>
+          <div class="focus-target-options" data-focus-target-options hidden>
+            <button type="button" class="ghost-button" data-copy-workspace-focus>Copy from workspace</button>
+            <button type="button" class="ghost-button" data-focus-target-type="cursor_project">Cursor project</button>
+            <button type="button" class="ghost-button" data-focus-target-type="chrome_page">Chrome page</button>
+            <button type="button" class="ghost-button" data-focus-target-type="app_file">App / file</button>
+            <button type="button" class="ghost-button" data-focus-target-type="desktop">Desktop</button>
+            <button type="button" class="ghost-button" data-focus-target-type="shell">Custom shell</button>
+          </div>
+        </section>
+        <div class="modal-actions">
+          <button type="submit" id="task-focus-save" class="primary-button">Save</button>
+          <button type="button" id="task-focus-clear" class="ghost-button">Clear</button>
+          <button type="button" id="task-focus-cancel" class="ghost-button">Cancel</button>
+        </div>
+      </form>
+    </div>
+    <div id="cursor-run-modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-labelledby="cursor-run-modal-title" aria-modal="true">
+        <h3 id="cursor-run-modal-title" class="modal-title">Working — choose source</h3>
+        <p class="modal-hint">
+          Pick an agent to track for this task. The task shows <strong>working</strong> and auto-clears to open when the
+          selected agent completes. Browser ChatGPT, Claude, and Gemini sessions appear under their provider and need the
+          Orchestra Chat Watch Chrome extension.
+        </p>
+        <div class="cursor-modal-body">
+          <div class="cursor-run-tabs" role="tablist" aria-label="Watcher options">
+            <button
+              type="button"
+              class="cursor-run-tab active"
+              id="cursor-watch-tab"
+              data-cursor-modal-tab="watching"
+              role="tab"
+              aria-selected="true"
+              aria-controls="cursor-watch-panel"
+            >
+              Working
+            </button>
+            <button
+              type="button"
+              class="cursor-run-tab"
+              id="cursor-settings-tab"
+              data-cursor-modal-tab="settings"
+              role="tab"
+              aria-selected="false"
+              aria-controls="cursor-settings-panel"
+            >
+              Settings
+            </button>
+          </div>
+          <div
+            id="cursor-watch-panel"
+            class="cursor-modal-panel active"
+            role="tabpanel"
+            aria-labelledby="cursor-watch-tab"
+          >
+            <div id="watch-source-choices" class="watch-source-choices">
+              <button type="button" class="ghost-button" data-watch-kind="cursor">Cursor</button>
+              <button type="button" class="ghost-button" data-watch-kind="openai">ChatGPT</button>
+              <button type="button" class="ghost-button" data-watch-kind="claude">Claude</button>
+              <button type="button" class="ghost-button" data-watch-kind="gemini">Gemini</button>
+              <button type="button" class="ghost-button" data-watch-kind="process">Process</button>
+            </div>
+            <div id="watch-subsource-toggle" class="watch-subsource-toggle" hidden></div>
+            <input
+              id="watch-search"
+              class="watch-search"
+              type="search"
+              placeholder="Search command, cwd, pid, tty…"
+              hidden
+            />
+            <ul id="cursor-run-list" class="cursor-run-list"></ul>
+          </div>
+          <div
+            id="cursor-settings-panel"
+            class="cursor-modal-panel"
+            role="tabpanel"
+            aria-labelledby="cursor-settings-tab"
+            hidden
+          >
+            <div id="install-all-hooks-section" class="cursor-hook-install-all">
+              <button type="button" class="primary-button" id="install-all-hooks-btn">Install all hooks</button>
+              <p class="hint">Local and remote hooks for Cursor, Claude, Gemini, and Codex.</p>
+              <span id="install-all-hooks-status"></span>
+            </div>
+            <div id="cursor-hook-controls" class="cursor-hook-controls">
+              <button type="button" class="ghost-button" id="install-local-hooks-btn">Install local Cursor hooks</button>
+              <button type="button" class="ghost-button" id="install-remote-hooks-btn">Install remote Cursor hooks</button>
+              <button type="button" class="ghost-button" id="test-hooks-btn">Test hook capture</button>
+              <span id="hook-status-text"></span>
+            </div>
+            <div id="claude-hook-controls" class="cursor-hook-controls">
+              <button type="button" class="ghost-button" id="install-local-claude-hooks-btn">
+                Install local Claude hooks
+              </button>
+              <button type="button" class="ghost-button" id="install-remote-claude-hooks-btn">
+                Install remote Claude hooks
+              </button>
+              <button type="button" class="ghost-button" id="test-claude-hooks-btn">Test Claude hook capture</button>
+              <span id="claude-hook-status-text"></span>
+            </div>
+            <div id="gemini-hook-controls" class="cursor-hook-controls">
+              <button type="button" class="ghost-button" id="install-local-gemini-hooks-btn">
+                Install local Gemini hooks
+              </button>
+              <button type="button" class="ghost-button" id="install-remote-gemini-hooks-btn">
+                Install remote Gemini hooks
+              </button>
+              <button type="button" class="ghost-button" id="test-gemini-hooks-btn">Test Gemini hook capture</button>
+              <span id="gemini-hook-status-text"></span>
+            </div>
+            <div id="codex-hook-controls" class="cursor-hook-controls">
+              <button type="button" class="ghost-button" id="install-local-codex-hooks-btn">
+                Install local Codex hooks
+              </button>
+              <button type="button" class="ghost-button" id="install-remote-codex-hooks-btn">
+                Install remote Codex hooks
+              </button>
+              <button type="button" class="ghost-button" id="test-codex-hooks-btn">Test Codex hook capture</button>
+              <span id="codex-hook-status-text"></span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="cursor-wait-set-done" class="ghost-button">Set to done</button>
+          <button type="button" id="cursor-wait-manual" class="ghost-button">Waiting only (no watcher)</button>
+          <button type="button" id="cursor-modal-cancel" class="ghost-button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <main class="app">
+      <aside class="sidebar">
+        <header class="sidebar-header">
+          <div class="sidebar-header-titled">
+            <h1>Projects</h1>
+            <button
+              type="button"
+              id="toggle-project-waiting-badges-btn"
+              class="pill pill-toggle project-waiting-badges-toggle"
+            >
+              hide progress
+            </button>
+          </div>
+          <button
+            id="projects-toggle-btn"
+            class="sidebar-toggle"
+            type="button"
+            aria-expanded="true"
+            aria-controls="toggle-project-waiting-badges-btn project-list new-project-btn new-project-form"
+            aria-label="Hide projects"
+            title="Hide projects"
+          >
+            &lt;
+          </button>
+        </header>
+        <ul id="project-list" class="project-list"></ul>
+        <button id="new-project-btn" class="ghost-button">+ New project</button>
+        <form id="new-project-form" class="new-project-form" hidden>
+          <input name="name" type="text" placeholder="Project name" required />
+          <section class="command-section workspace-launch-card">
+            <div class="command-section-header">
+              <span class="field-label">Workspace Launch</span>
+              <button type="button" class="ghost-button command-copy-button" data-configure-workspace>
+                Configure
+              </button>
+            </div>
+            <div class="workspace-summary-list" data-workspace-summary></div>
+          </section>
+          <label class="field-label">Task summary</label>
+          <textarea name="task_summary" rows="2" placeholder="Overall goal for this project"></textarea>
+          <details class="remote-watch-panel" data-remote-watch-panel>
+            <summary>Remote watch hosts (optional)</summary>
+            <p class="hint">Add one row per SSH host. Each remote Cursor workspace row picks a host below.</p>
+            <div data-cursor-remote-hosts></div>
+            <button type="button" class="ghost-button add-launch-command" data-add-cursor-remote-host>
+              + Add remote watch host
+            </button>
+          </details>
+          <details class="remote-watch-panel" data-cursor-workspaces-panel>
+            <summary>Workspaces</summary>
+            <p class="hint">Limit agent/process results to these workspace paths.</p>
+            <div data-cursor-workspaces></div>
+            <button type="button" class="ghost-button add-launch-command" data-add-cursor-workspace>
+              + Add workspace
+            </button>
+          </details>
+          <details class="remote-watch-panel workspace-editor-panel" data-workspace-panel>
+            <summary>Configure Workspace Launch</summary>
+            <div class="command-section-header">
+              <span class="field-label">Launch targets</span>
+            </div>
+            <div class="workspace-item-list" data-workspace-items></div>
+            <button type="button" class="ghost-button add-launch-command" data-add-workspace-item>
+              + Add launch target
+            </button>
+          </details>
+          <label class="checkbox-label">
+            <input name="is_backlog" type="checkbox" />
+            <span>Back Log project</span>
+          </label>
+          <p class="hint">Back Log projects stay in their folder and do not show in the menu bar.</p>
+          <div class="color-row" role="radiogroup" aria-label="Color"></div>
+          <div class="form-actions">
+            <button type="submit" class="primary-button">Create</button>
+            <button type="button" class="ghost-button" data-cancel>Cancel</button>
+          </div>
+          <p class="hint">Workspace launch targets run as shell commands on your Mac.</p>
+        </form>
+      </aside>
+      <section class="pane">
+        <div id="empty-state" class="empty-state">
+          <p>No project selected.</p>
+          <p class="hint">Create a project to get started.</p>
+        </div>
+        <article id="project-view" class="project-view" hidden>
+          <header class="pane-header">
+            <div class="pane-title">
+              <h2 id="project-name"></h2>
+              <button id="edit-project-btn" class="icon-button" title="Edit project">Edit</button>
+              <button id="delete-project-btn" class="icon-button danger" title="Delete project">Delete</button>
+            </div>
+            <div class="pane-actions">
+              <button type="button" id="toggle-task-backlog-btn" class="ghost-button pane-action-btn">
+                Show Backlog
+              </button>
+              <button id="workspace-btn" class="primary-button pane-action-btn">Open Workspace</button>
+            </div>
+          </header>
+          <div class="project-task-summary-pane">
+            <p class="project-task-summary-label">Task summary</p>
+            <p id="project-task-summary-display" class="project-task-summary-display">No task summary set.</p>
+          </div>
+          <form id="edit-project-form" class="edit-project-form" hidden>
+            <input name="name" type="text" placeholder="Project name" required />
+            <section class="command-section workspace-launch-card">
+              <div class="command-section-header">
+                <span class="field-label">Workspace Launch</span>
+                <button type="button" class="ghost-button command-copy-button" data-configure-workspace>
+                  Configure
+                </button>
+              </div>
+              <div class="workspace-summary-list" data-workspace-summary></div>
+            </section>
+            <label class="field-label">Task summary</label>
+            <textarea name="task_summary" rows="2" placeholder="Overall goal for this project"></textarea>
+            <details class="remote-watch-panel" data-remote-watch-panel>
+              <summary>Remote watch hosts (optional)</summary>
+              <p class="hint">Add one row per SSH host. Each remote Cursor workspace row picks a host below.</p>
+              <div data-cursor-remote-hosts></div>
+              <button type="button" class="ghost-button add-launch-command" data-add-cursor-remote-host>
+                + Add remote watch host
+              </button>
+            </details>
+            <details class="remote-watch-panel" data-cursor-workspaces-panel>
+              <summary>Workspaces</summary>
+              <p class="hint">Limit agent/process results to these workspace paths.</p>
+              <div data-cursor-workspaces></div>
+              <button type="button" class="ghost-button add-launch-command" data-add-cursor-workspace>
+                + Add workspace
+              </button>
+            </details>
+            <details class="remote-watch-panel workspace-editor-panel" data-workspace-panel>
+              <summary>Configure Workspace Launch</summary>
+              <div class="command-section-header">
+                <span class="field-label">Launch targets</span>
+              </div>
+              <div class="workspace-item-list" data-workspace-items></div>
+              <button type="button" class="ghost-button add-launch-command" data-add-workspace-item>
+                + Add launch target
+              </button>
+            </details>
+            <label class="checkbox-label">
+              <input name="is_backlog" type="checkbox" />
+              <span>Back Log project</span>
+            </label>
+            <p class="hint">Back Log projects stay in their folder and do not show in the menu bar.</p>
+            <div class="color-row" role="radiogroup" aria-label="Color"></div>
+            <div class="form-actions">
+              <button type="submit" class="primary-button">Save</button>
+              <button type="button" class="ghost-button" data-cancel>Cancel</button>
+            </div>
+          </form>
+          <ul id="task-list" class="task-list"></ul>
+          <form id="new-task-form" class="new-task-form">
+            <textarea
+              name="text"
+              rows="2"
+              placeholder="+ Add task (Shift+Enter for newline)"
+              autocomplete="off"
+              spellcheck="true"
+            ></textarea>
+          </form>
+          <footer class="pane-footer">
+            <span id="task-summary"></span>
+          </footer>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

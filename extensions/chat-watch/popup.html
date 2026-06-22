@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chat Watch Inspector</title>
+    <style>
+      body {
+        width: 360px;
+        margin: 0;
+        padding: 14px;
+        color: #1f2937;
+        font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f8fafc;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        padding: 9px 10px;
+        color: white;
+        background: #2563eb;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 600;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+
+      .hint {
+        color: #64748b;
+        margin: 8px 0 12px;
+      }
+
+      .settings {
+        margin: 0 0 12px;
+        padding: 10px;
+        border-radius: 8px;
+        background: white;
+        border: 1px solid #e2e8f0;
+      }
+
+      .settings label {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 0 0 8px;
+        cursor: pointer;
+      }
+
+      .settings label:last-child {
+        margin-bottom: 0;
+      }
+
+      .settings input {
+        margin-top: 2px;
+      }
+
+      .settings span {
+        display: block;
+      }
+
+      .settings small {
+        display: block;
+        color: #64748b;
+        margin-top: 2px;
+      }
+
+      .status {
+        margin: 10px 0;
+        padding: 8px;
+        border-radius: 8px;
+        background: white;
+        border: 1px solid #e2e8f0;
+      }
+
+      .status.error {
+        color: #991b1b;
+        background: #fef2f2;
+        border-color: #fecaca;
+      }
+
+      dl {
+        display: grid;
+        grid-template-columns: 118px 1fr;
+        gap: 4px 8px;
+        margin: 10px 0 0;
+      }
+
+      dt {
+        color: #64748b;
+      }
+
+      dd {
+        margin: 0;
+        word-break: break-word;
+      }
+
+      pre {
+        max-height: 260px;
+        overflow: auto;
+        margin: 12px 0 0;
+        padding: 10px;
+        border-radius: 8px;
+        background: #0f172a;
+        color: #e2e8f0;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Chat Watch Inspector</h1>
+    <p class="hint">Open a supported AI chat tab, then inspect page signals. Prompt previews are off by default.</p>
+    <div class="settings">
+      <label>
+        <input id="debug-toggle" type="checkbox">
+        <span>
+          Debug logging
+          <small>Log snapshot tables to the page console when inspecting or on changes.</small>
+        </span>
+      </label>
+      <label>
+        <input id="prompt-preview-toggle" type="checkbox">
+        <span>
+          Send prompt previews
+          <small>Include a short excerpt of the latest user message in Orchestra snapshots (max 240 chars).</small>
+        </span>
+      </label>
+    </div>
+    <button id="inspect">Inspect Current Tab</button>
+    <div id="status" class="status">Ready.</div>
+    <div id="summary"></div>
+    <pre id="json" hidden></pre>
+    <script src="popup.js"></script>
+  </body>
+</html>
