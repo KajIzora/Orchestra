@@ -79,6 +79,7 @@ const {
   loadCursorCliConfigRemote,
   isCursorCliHook,
 } = require('./lib/cursor_cli_permission');
+const { createCursorChatDbReader, remotePendingAskQuestion } = require('./lib/cursor_chat_db');
 const { createRendererPermissionProbe } = require('./lib/cursor_renderer_permission_probe');
 const { createAgentExecPermissionProbe } = require('./lib/cursor_agent_exec_probe');
 const { applyCursorRendererPermissionEvents } = require('./lib/cursor_renderer_watch');
@@ -134,7 +135,9 @@ const {
   readLocalAgyCliCancelSignals,
   readRemoteAgyCliCancelSignals,
   readRemoteAgyCliDbPermissionSignals,
+  readRemoteAgyCliPermissionSignals,
   readLocalAgyCliDbPermissionSignals,
+  readLocalAgyCliPermissionSignals,
   readLocalAgyAppCancelSignals,
   readLocalAgyAppLanguageServerCancelSignals,
   readLocalAgyAppPermissionSignals,
@@ -297,6 +300,26 @@ function resolveCursorCliConfig(body) {
 const cursorCliPermissionTracker = createCursorCliPermissionTracker({
   resolveConfig: resolveCursorCliConfig,
 });
+// cursor-CLI question gate: cursor emits NO hook and only a DELAYED transcript AskQuestion (written
+// after the answer), but the chat store.db carries the pending question the instant the gate renders.
+// This reader returns "is the head a pending AskQuestion" for a tracked conversation (local-only,
+// mtime-gated, linked_at-gated). It AUGMENTS the transcript path (see getCursorChatDbQuestionHint).
+const cursorChatDbReader = createCursorChatDbReader();
+// `--source ssh` cursor-cli runs the agent headless on the REMOTE, so its chat store.db is on the
+// remote. The watch poll's chat-db hint is synchronous, so (like the remote CLI-config above) we keep
+// a small cache and refresh it in the background over ssh; a cold miss returns false (no early signal
+// yet) and the next poll picks up the cached pending state. TTL ~ the 2s poll cadence.
+const cursorChatDbRemoteCache = new Map(); // key (host\0conv) -> { pending, at }
+const CURSOR_CHATDB_REMOTE_TTL_MS = 3000;
+const cursorChatDbRemoteFetches = new Set(); // in-flight ssh reads, deduped by key
+function scheduleRemoteCursorChatDbRefresh(key, host, conv, sinceMs) {
+  if (cursorChatDbRemoteFetches.has(key)) return;
+  cursorChatDbRemoteFetches.add(key);
+  remotePendingAskQuestion({ host, conversationId: conv, sinceMs, runSsh: createSshRunner(), timeoutMs: 4000 })
+    .then((pending) => { cursorChatDbRemoteCache.set(key, { pending: !!pending, at: Date.now() }); })
+    .catch(() => {})
+    .finally(() => { cursorChatDbRemoteFetches.delete(key); });
+}
 const codexHookStore = createCodexHookStore({ token: resolveHookToken('CODEX_HOOK_TOKEN', 'codex') });
 const claudeHookStore = createClaudeHookStore({
   token: resolveHookToken('CLAUDE_HOOK_TOKEN', 'claude'),
@@ -3737,7 +3760,9 @@ async function main() {
   const localAgyCliLogOffsets = new Map();
   const remoteAgyCliLogOffsets = new Map();
   const localAgyCliPermissionOffsets = new Map();
+  const localAgyCliLogPermissionOffsets = new Map();
   const remoteAgyCliPermissionOffsets = new Map();
+  const remoteAgyCliLogPermissionOffsets = new Map();
   const localAgyAppCancelState = new Map();
   const localAgyAppPermissionState = new Map();
   const localAgyAppLanguageServerCancelState = {};
@@ -3885,6 +3910,22 @@ async function main() {
       // Keep polling despite local agy CLI DB read errors.
     }
     try {
+      // The DB poll above is lossy/laggy for a fast-answered gate: the status=9 "requested" row is
+      // overwritten with the grant inside one ~1s poll window, so the request edge is never seen
+      // (read_file gates especially auto-resolve fast). agy-cli also writes an append-only
+      // "Surfacing tool confirmation: …" request line (and "Responding … stepIdx=N" grant) to its
+      // cli-*.log the instant a gate surfaces — one per real gate, repaint-proof and step-indexed.
+      // Read those additively so a gate the DB drops or lags is still surfaced as needs-input. Same
+      // conversion + apply path (agyAppSignalToGeminiHookBody maps the permission_requested/_granted
+      // kinds), and a gate both sources see is idempotent in the hook store (pending stays
+      // pending/clears once). Separate offset map from the cancel reader so the two log scans don't
+      // consume each other's bytes.
+      const out = await readLocalAgyCliPermissionSignals(localAgyCliLogPermissionOffsets);
+      await applyLocalAgyAppPermissionSignals(out.events);
+    } catch {
+      // Keep polling despite local agy CLI log read errors.
+    }
+    try {
       const out = await readLocalAgyAppPermissionSignals(localAgyAppPermissionState, {
         sinceMs: localAgyAppPermissionSinceMs,
       });
@@ -4025,6 +4066,36 @@ async function main() {
         } catch {
           // Keep polling despite transient remote agy CLI permission DB errors.
         }
+        try {
+          // Remote parity for the local log-line permission read: the remote DB poll above misses a
+          // fast-answered gate (status=9 row overwritten within a poll), so additively read the remote
+          // agy CLI log gate lines ("Surfacing tool confirmation: … at step N") over ssh and surface a
+          // dropped gate as needs-input. Same conversion + apply path as the remote DB signals; a gate
+          // both sources see is idempotent in the hook store. Separate offset map from the cancel reader.
+          const logPermissionKey = cfg.host;
+          const logPermissionOffsets = remoteAgyCliLogPermissionOffsets.get(logPermissionKey) || new Map();
+          remoteAgyCliLogPermissionOffsets.set(logPermissionKey, logPermissionOffsets);
+          const out = await readRemoteAgyCliPermissionSignals(cfg, logPermissionOffsets, { runSsh });
+          let remoteGeminiCompleted = 0;
+          for (const signal of out.events || []) {
+            const body = agyAppSignalToGeminiHookBody({ ...signal, remoteHost: cfg.host });
+            if (body) hookEventLog.push('gemini', body);
+            const result = body ? geminiHookStore.ingestEvent(body) : null;
+            if (result?.ok && result.snapshot) {
+              remoteGeminiCompleted += applyGeminiHookCompletion(
+                () => storage.getState(),
+                (task) => {
+                  completeWatchTask(task);
+                },
+                result.snapshot,
+                geminiHookApplyOptions()
+              );
+            }
+          }
+          if (remoteGeminiCompleted > 0) await storage.save();
+        } catch {
+          // Keep polling despite transient remote agy CLI permission log errors.
+        }
 
       }
     }
@@ -4061,6 +4132,29 @@ async function main() {
     isCursorCliPermissionPending: (cursorTracking) => {
       const conv = cursorTracking?.conversation_id || cursorTracking?.run_id || '';
       return conv ? cursorCliPermissionTracker.isPending(conv) : false;
+    },
+    // cursor question gate via the chat store.db (lib/cursor_chat_db.js). Returns true while the
+    // conversation head is a pending AskQuestion asked AFTER linked_at — the early, reliable question
+    // signal the transcript only records after the answer. ORed into askQuestionClear (augment).
+    // Local runs read the local store.db synchronously; ssh runs read the REMOTE store.db over ssh via
+    // a background-refreshed cache (the hint is sync, so a cold miss returns false and the next poll
+    // picks up the cached pending state) — cursor-cli runs the agent headless on the remote.
+    getCursorChatDbQuestionHint: (cursorTracking) => {
+      if (!cursorTracking) return false;
+      const conv = cursorTracking.conversation_id || cursorTracking.run_id || '';
+      if (!conv) return false;
+      const sinceMs = Date.parse(cursorTracking.linked_at || '') || 0;
+      if (cursorTracking.source === 'ssh') {
+        const host = cursorTracking.host || cursorTracking.remote_host || '';
+        if (!host) return false;
+        const key = `${host}\0${conv}`;
+        const cached = cursorChatDbRemoteCache.get(key);
+        if (!cached || Date.now() - cached.at >= CURSOR_CHATDB_REMOTE_TTL_MS) {
+          scheduleRemoteCursorChatDbRefresh(key, host, conv, sinceMs);
+        }
+        return cached ? cached.pending : false;
+      }
+      return cursorChatDbReader.pendingAskQuestion(conv, { sinceMs });
     },
     shouldCompleteCursorWatch: (cursorTracking, options = {}) =>
       cursorWatchShouldClearSince(cursorTracking, options),
