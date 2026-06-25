@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="120" viewBox="0 0 720 120" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="720" height="120" rx="14" fill="#f6f7f9"/>
+
+  <!-- Watching -->
+  <circle cx="40" cy="44" r="9" fill="#4a7dc9"/>
+  <circle cx="40" cy="44" r="9" fill="none" stroke="#4a7dc9" stroke-width="2" opacity="0.35">
+    <animate attributeName="r" values="9;15;9" dur="2s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.45;0;0.45" dur="2s" repeatCount="indefinite"/>
+  </circle>
+  <text x="58" y="40" font-size="16" font-weight="600" fill="#2c3245">Watching</text>
+  <text x="58" y="60" font-size="13" fill="#6b7280">An agent / process is live</text>
+
+  <!-- Waiting -->
+  <circle cx="220" cy="44" r="9" fill="#d79a2a"/>
+  <text x="238" y="40" font-size="16" font-weight="600" fill="#2c3245">Waiting</text>
+  <text x="238" y="60" font-size="13" fill="#6b7280">It's working — sit tight</text>
+
+  <!-- Needs input -->
+  <circle cx="400" cy="44" r="9" fill="#e06a5a"/>
+  <text x="418" y="40" font-size="16" font-weight="600" fill="#2c3245">Needs input</text>
+  <text x="418" y="60" font-size="13" fill="#6b7280">Your turn — go act on it</text>
+
+  <!-- Done -->
+  <circle cx="590" cy="44" r="9" fill="#2d9d78"/>
+  <text x="608" y="40" font-size="16" font-weight="600" fill="#2c3245">Done</text>
+  <text x="608" y="60" font-size="13" fill="#6b7280">Finished, cleared</text>
+
+  <text x="40" y="98" font-size="13" fill="#9aa1ac">A glance tells you which agents are still cooking and which ones are stuck waiting on you.</text>
+</svg>

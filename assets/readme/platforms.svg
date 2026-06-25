@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="380" viewBox="0 0 860 380" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="860" height="380" rx="16" fill="#f6f7f9"/>
+  <text x="40" y="46" font-size="20" font-weight="700" fill="#2c3245">What it can track</text>
+  <text x="40" y="70" font-size="13" fill="#9aa1ac">Mix and match — Orchestra watches them all at once.</text>
+
+  <!-- Column headers -->
+  <g font-size="12" font-weight="700" letter-spacing="0.5">
+    <text x="40"  y="110" fill="#4a7dc9">IN THE BROWSER</text>
+    <text x="320" y="110" fill="#6a5acd">CLI</text>
+    <text x="600" y="110" fill="#2d9d78">IDE / DESKTOP</text>
+  </g>
+
+  <!-- pill helper style via repeated rects -->
+  <g font-size="13" fill="#2c3245">
+    <!-- Browser column -->
+    <rect x="40" y="124" width="240" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="56" y="146">ChatGPT</text>
+    <rect x="40" y="166" width="240" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="56" y="188">Claude</text>
+    <rect x="40" y="208" width="240" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="56" y="230">Gemini</text>
+
+    <!-- CLI column -->
+    <rect x="320" y="124" width="240" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="336" y="146">Claude Code</text>
+    <rect x="320" y="166" width="240" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="336" y="188">Codex</text>
+    <rect x="320" y="208" width="240" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="336" y="230">Cursor CLI / Agent</text>
+    <rect x="320" y="250" width="240" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="336" y="272">Antigravity CLI</text>
+
+    <!-- IDE / Desktop column -->
+    <rect x="600" y="124" width="220" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="616" y="146">Claude Code (VS Code · desktop)</text>
+    <rect x="600" y="166" width="220" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="616" y="188">Codex (VS Code · desktop)</text>
+    <rect x="600" y="208" width="220" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="616" y="230">Cursor IDE</text>
+    <rect x="600" y="250" width="220" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="616" y="272">Antigravity (desktop)</text>
+    <rect x="600" y="292" width="220" height="34" rx="8" fill="#ffffff" stroke="#e2e5ea"/>
+    <text x="616" y="314">Claude Cowork</text>
+  </g>
+
+  <!-- Terminal callout, full width -->
+  <rect x="40" y="292" width="520" height="48" rx="10" fill="#2c3245"/>
+  <circle cx="64" cy="316" r="5" fill="#3bb89a"/>
+  <text x="80" y="312" font-size="13" font-weight="600" fill="#ffffff">+ Any terminal process</text>
+  <text x="80" y="330" font-size="11" fill="#aeb6c4">Point it at a PID — e.g. a long-running Python script — and waiting clears when it exits.</text>
+</svg>

@@ -17,3 +17,6 @@ launchd.err.log
 
 # macOS
 .DS_Store
+
+# Large source videos (the README uses the compressed GIFs in assets/gifs/ instead)
+assets/*.mov
