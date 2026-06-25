@@ -31,6 +31,7 @@ const {
   workspacePathToProjectSlug,
   cursorWatchShouldClearSince,
   cursorTranscriptCancelSince,
+  cursorTranscriptAskQuestionRecordedSince,
   readCursorTranscriptText,
 } = require('./lib/cursor_tracker');
 const {
@@ -4134,8 +4135,8 @@ async function main() {
       return conv ? cursorCliPermissionTracker.isPending(conv) : false;
     },
     // cursor question gate via the chat store.db (lib/cursor_chat_db.js). Returns true while the
-    // conversation head is a pending AskQuestion asked AFTER linked_at — the early, reliable question
-    // signal the transcript only records after the answer. ORed into askQuestionClear (augment).
+    // conversation head is a pending AskQuestion asked AFTER linked_at — the sole question-open
+    // signal for cursor-cli (the transcript AskQuestion row is delayed until after the answer).
     // Local runs read the local store.db synchronously; ssh runs read the REMOTE store.db over ssh via
     // a background-refreshed cache (the hint is sync, so a cold miss returns false and the next poll
     // picks up the cached pending state) — cursor-cli runs the agent headless on the remote.
@@ -4156,6 +4157,10 @@ async function main() {
       }
       return cursorChatDbReader.pendingAskQuestion(conv, { sinceMs });
     },
+    // Positive resume signal for a cursor-cli question gate: AskQuestion recorded in the transcript
+    // after the pause (written only after the user answers).
+    getCursorTranscriptAskQuestionRecordedSince: (cursorTracking, options = {}) =>
+      cursorTranscriptAskQuestionRecordedSince(cursorTracking, options),
     shouldCompleteCursorWatch: (cursorTracking, options = {}) =>
       cursorWatchShouldClearSince(cursorTracking, options),
     shouldCompleteRemoteCursorWatch: (cursorTracking, options = {}) =>
