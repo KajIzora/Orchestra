@@ -10,8 +10,6 @@
 
 <img src="assets/screenshots/hero.png" width="820" alt="Orchestra main window" />
 
-<sub>*(Drop your own screenshot at `assets/screenshots/hero.png` — see [Screenshots](#a-note-on-the-screenshots).)*</sub>
-
 </div>
 
 <br />
