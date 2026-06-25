@@ -66,6 +66,12 @@ In words, that's:
 - **IDE / desktop** — Claude Code (VS Code plugin + desktop app), Codex (VS Code plugin + desktop app), Cursor IDE, Antigravity (desktop), Claude Cowork
 - **Any terminal process** — point it at a PID (like a long-running Python script) and the task clears when the process exits
 
+### How it knows what an agent is doing
+
+Different tools expose their state in different ways, so Orchestra meets each one where it lives. Depending on the platform it watches some mix of: **agent hooks** (the cleanest signal, where the tool supports them), **transcript files**, **local SQLite databases** (like Cursor's chat history), **log files**, **running processes** (PID checks), and **browser activity** (via the extension). You don't have to think about which — you pick a task to watch and Orchestra figures out the right source.
+
+It's all local, and some of these read agent files on your machine. Nothing leaves your Mac — see [SECURITY.md](SECURITY.md) for exactly what it touches. The full mechanism-by-mechanism breakdown is in [`docs/watching-and-hooks.md`](docs/watching-and-hooks.md).
+
 ## The status system
 
 The point is that one glance tells you where everything stands.
