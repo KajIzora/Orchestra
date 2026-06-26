@@ -4,7 +4,7 @@
 
 # Orchestra
 
-### One place to keep track of every AI agent you've got running — across ChatGPT, Claude, Codex, Gemini, Cursor, Antigravity, Cowork, and even plain terminal processes.
+### A single place to track every AI agent you have running — across ChatGPT, Claude, Codex, Gemini, Cursor, Antigravity, Cowork, and plain terminal processes.
 
 <br />
 
@@ -16,24 +16,20 @@
 
 ## Why I built this
 
-I made Orchestra for myself.
-
-The problem: I kept losing track of what my agents were doing. Even on a *single* platform it got hard — and I'm usually running several at once across different tools. I never liked sitting around watching an agent grind, so I'd kick one off and go start something else. But the context-switching killed me. Every time I came back to an agent I'd lose a minute just reconstructing *what was this one even doing, and what do I need to do next?*
-
-So I built one place to answer exactly that. Glance at it and you can see: this agent is on this task, it's still working, that one's waiting on me — go deal with it. That's the whole idea.
+Orchestra is a app I built to help track agents across different platforms. I've found that even within a single platform this was difficult, and I typically run several agents at once across different tools. I would start an agent, move on to other work, and then spend time reconstructing what each one had been doing on returning to it. Orchestra consolidates this into one place — at a glance, you can see which agent is handling which task, what is still running, and what is waiting on you.
 
 > [!NOTE]
-> **This is a personal tool I'm putting out there, not a polished product launch.** It works, and I use it daily, but I built it for me, so there are definitely bugs and rough edges. I'm sharing it because other people wrestle with the same problem — so use it, fork it, break it, rip out the parts you like. No promises, no support guarantees. If it's useful to you, great.
+> **This is a personal tool I am sharing, not a polished product launch.** It works, and I use it daily, but I built it for my own use, so expect bugs and rough edges. I am making it available because others run into the same problem — use it, fork it, and modify it as you see fit. There are no promises or support guarantees.
 
 ## A note on cost
 
-There's a money angle too. Aggregator platforms are great — one place, every frontier model — but you're usually paying metered **API rates**, which add up fast if you code a lot. Going direct to the model companies on flat **subscriptions** is often dramatically cheaper. Two $20 subscriptions to two different providers can come in well under one $60 aggregator bill, *and* you get to sample whatever each company is shipping at the cutting edge instead of betting on one.
+There is also a cost consideration. Aggregator platforms put every frontier model in one place, but access is usually billed at metered **API rates**, which add up quickly for heavy use. Going directly to the model companies on flat **subscriptions** is often considerably cheaper — two $20 subscriptions to two different providers can come in well under one $60 aggregator bill, and this lets you sample what each company ships at the cutting edge rather than committing to a single provider.
 
-The catch has always been juggling all those separate tools. That's the friction Orchestra is meant to kill: spread your work across whatever's cheapest and best, and still have one place that knows what every agent is doing.
+The drawback has always been managing separate tools. Orchestra is intended to remove that friction: distribute your work across whatever is cheapest and best, while keeping a single view of what every agent is doing.
 
 ## What it looks like in action
 
-Each clip is the same app watching a different surface. They're sped up a touch so you can see a full loop quickly.
+Each clip shows the same app watching a different surface. They are sped up slightly so a full loop plays quickly.
 
 ### CLI agents
 
@@ -45,7 +41,7 @@ Each clip is the same app watching a different surface. They're sped up a touch 
 
 ### Inside the IDE — *and a live terminal process*
 
-This one also shows Orchestra tracking a plain terminal process: I kick off a small Python script and Orchestra watches it, clearing the task from **waiting** the moment the script exits. Same mechanism works for any long-running command.
+This clip also shows Orchestra tracking a plain terminal process: I start a small Python script, and Orchestra watches it, clearing the task from **waiting** the moment the script exits. The same mechanism works for any long-running command.
 
 <img src="assets/gifs/Asset3-ide.gif" width="760" alt="Orchestra tracking IDE agents and a terminal process" />
 
@@ -55,11 +51,11 @@ This one also shows Orchestra tracking a plain terminal process: I kick off a sm
 
 ## What it can track
 
-The core feature is following agents **across platforms** so you don't have to keep a dozen windows in your head.
+The core feature is following agents **across platforms**, so you do not have to keep track of a dozen windows yourself.
 
 <img src="assets/readme/platforms.svg" width="820" alt="Supported platforms: ChatGPT, Claude, Gemini in the browser; Claude Code, Codex, Cursor, Antigravity on the CLI; Cursor IDE, Antigravity, Cowork on the desktop; plus any terminal process" />
 
-In words, that's:
+In detail:
 
 - **In the browser** — ChatGPT, Claude, and Gemini (via the [Chrome extension](#the-chrome-extension))
 - **CLI** — Claude Code, Codex, Cursor CLI / agent window, Antigravity CLI
@@ -68,19 +64,19 @@ In words, that's:
 
 ### How it knows what an agent is doing
 
-Different tools expose their state in different ways, so Orchestra meets each one where it lives. Depending on the platform it watches some mix of: **agent hooks** (the cleanest signal, where the tool supports them), **transcript files**, **local SQLite databases** (like Cursor's chat history), **log files**, **running processes** (PID checks), and **browser activity** (via the extension). You don't have to think about which — you pick a task to watch and Orchestra figures out the right source.
+Different tools expose their state in different ways, so Orchestra uses whatever signal each one provides. Depending on the platform, it watches some combination of: **agent hooks** (the cleanest signal, where the tool supports them), **transcript files**, **local SQLite databases** (such as Cursor's chat history), **log files**, **running processes** (PID checks), and **browser activity** (via the extension). You do not need to choose among these — you select a task to watch, and Orchestra determines the appropriate source.
 
-It's all local, and some of these read agent files on your machine. Nothing leaves your Mac — see [SECURITY.md](SECURITY.md) for exactly what it touches. The full mechanism-by-mechanism breakdown is in [`docs/watching-and-hooks.md`](docs/watching-and-hooks.md).
+All of this runs locally, and some of these sources read agent files on your machine. Nothing leaves your Mac; see [SECURITY.md](SECURITY.md) for exactly what it accesses. A full mechanism-by-mechanism breakdown is in [`docs/watching-and-hooks.md`](docs/watching-and-hooks.md).
 
 ## The status system
 
-The point is that one glance tells you where everything stands.
+A single glance is enough to tell you where everything stands.
 
 <img src="assets/readme/status-legend.svg" width="720" alt="Status legend: watching, waiting, needs input, done" />
 
 ## Quick start
 
-**You'll need:** macOS and [Node.js](https://nodejs.org/) 22.12 or newer.
+**Requirements:** macOS and [Node.js](https://nodejs.org/) 22.12 or newer.
 
 ```bash
 git clone https://github.com/KajIzora/Orchestra.git orchestra
@@ -92,44 +88,44 @@ npm start
 
 Open the URL it prints (usually `http://127.0.0.1:47823`).
 
-Prefer a native window?
+For a native window:
 
 ```bash
 npm run desktop:dev
 ```
 
-That opens an Electron app on the same local backend. If a server's already running, it just attaches to it.
+This opens an Electron app on the same local backend. If a server is already running, it attaches to that instead.
 
 > [!IMPORTANT]
-> Orchestra runs **shell commands on your Mac** for its *Open Workspace*, task *Focus*, and watcher features — commands **you** write. It doesn't sandbox them. Only run it on a machine you trust, and keep it bound to localhost. More in [SECURITY.md](SECURITY.md).
+> Orchestra runs **shell commands on your Mac** for its *Open Workspace*, task *Focus*, and watcher features — commands **you** write. It does not sandbox them. Only run it on a machine you trust, and keep it bound to localhost. See [SECURITY.md](SECURITY.md) for details.
 
 ## The Chrome extension
 
-To track agents in the browser (ChatGPT, Claude, Gemini) you need the extension — and **it's not on the Chrome Web Store.** You load it unpacked through Chrome's developer tools:
+Tracking agents in the browser (ChatGPT, Claude, Gemini) requires the extension, which **is not on the Chrome Web Store.** It is loaded unpacked through Chrome's developer tools:
 
 1. Go to `chrome://extensions`
-2. Turn on **Developer mode** (top-right toggle)
+2. Enable **Developer mode** (top-right toggle)
 3. Click **Load unpacked** and select the `extensions/chat-watch` folder in this repo
-4. Pin it if you want quick access
+4. Pin it for quick access if desired
 
-Full details and the privacy notes are in [`extensions/chat-watch/README.md`](extensions/chat-watch/README.md).
+Full details and privacy notes are in [`extensions/chat-watch/README.md`](extensions/chat-watch/README.md).
 
 ## How it fits together
 
-If you want to build on it, here's the shape of the thing. Everything is local — signals from hooks, the extension, and process watchers all flow into one local Node server, which drives a single view.
+For those who want to build on it, here is the overall shape. Everything runs locally: signals from hooks, the extension, and process watchers all flow into a single local Node server, which drives one view.
 
 <img src="assets/readme/architecture.svg" width="820" alt="Architecture: agent hooks, Chrome extension, process watcher, and desktop apps all feed a local Node server, which drives one view" />
 
 ## Want to build on it?
 
-Have at it — that's why it's here. The code is MIT, the server is plain Node, and the UI is vanilla HTML/CSS/JS under `public/`. A few pointers:
+Contributions and forks are welcome. The code is MIT-licensed, the server is plain Node, and the UI is vanilla HTML/CSS/JS under `public/`. Useful starting points:
 
 - [`docs/project-actions.md`](docs/project-actions.md) — Open Workspace and task Focus launch targets
 - [`docs/watching-and-hooks.md`](docs/watching-and-hooks.md) — how watchers and agent hooks work
 - [`docs/api-reference.md`](docs/api-reference.md) — the local HTTP API
 
 > [!TIP]
-> **There's also a testing harness.** While building this I made a separate repo that auto-spins-up agents and runs them through Orchestra's logic with extensive logging — handy if you want to verify changes against real agent behavior. It's **not public yet**, but if people are interested I'll put it up. Open an issue and let me know.
+> **There is also a testing harness.** While building Orchestra I created a separate repository that automatically spins up agents and runs them through Orchestra's logic with extensive logging — useful for verifying changes against real agent behavior. It is **not yet public**, but I am happy to release it if there is interest. Open an issue to let me know.
 
 ---
 
@@ -306,7 +302,7 @@ Unload with `launchctl unload` on the same path.
 
 ### A note on the screenshots
 
-The hero image at the top loads from `assets/screenshots/hero.png`. Drop your own screenshot there to make it show up — ideally with a few tasks in different live states (watching / waiting / needs input) so the colored status dots show off the glanceable view. The demo GIFs live under `assets/gifs/` and the source videos are kept out of the repo (they're large) via `.gitignore`.
+The hero image at the top loads from `assets/screenshots/hero.png`. Replace that file with your own screenshot to update it — ideally one with a few tasks in different live states (watching / waiting / needs input) so the colored status dots demonstrate the glanceable view. The demo GIFs live under `assets/gifs/`, and the source videos are kept out of the repository (they are large) via `.gitignore`.
 
 ### Project layout
 
@@ -331,4 +327,4 @@ orchestra/
 
 ## License
 
-[MIT](LICENSE) — do what you like with it.
+[MIT](LICENSE).
