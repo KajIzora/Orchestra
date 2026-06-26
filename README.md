@@ -110,6 +110,17 @@ Tracking agents in the browser (ChatGPT, Claude, Gemini) requires the extension,
 
 Full details and privacy notes are in [`extensions/chat-watch/README.md`](extensions/chat-watch/README.md).
 
+## Tracking agents on remote servers (SSH)
+
+Orchestra is not limited to agents on your own machine. If you SSH into another computer, configure that workspace, and install the hooks there, Orchestra can track agents running on the remote server as well. The remote tools currently supported are:
+
+- **Cursor** — IDE and CLI
+- **Claude Code** — CLI and VS Code plugin
+- **Codex** — CLI and VS Code plugin
+- **Antigravity** — CLI
+
+Remote tracking runs over SSH and requires passwordless access to the host (for example, `ssh your-host true` should succeed without a prompt). Set the **Remote watch host** in project settings, then use the in-app remote hook installers, which place the necessary scripts on the remote machine so its agent events reach your local Orchestra server. Because this reads and runs commands on hosts you configure, only enable it on machines you trust. See [`docs/watching-and-hooks.md`](docs/watching-and-hooks.md) for the full setup.
+
 ## How it fits together
 
 For those who want to build on it, here is the overall shape. Everything runs locally: signals from hooks, the extension, and process watchers all flow into a single local Node server, which drives one view.
