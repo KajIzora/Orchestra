@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Orchestra Chat Watch",
-  "version": "0.3.0",
+  "version": "0.5.20",
   "description": "Syncs ChatGPT, Claude, and Gemini tab state to Orchestra for browser chat watching.",
-  "permissions": ["activeTab", "tabs", "storage", "webRequest"],
+  "permissions": ["activeTab", "tabs", "storage", "webRequest", "alarms"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
@@ -42,6 +42,19 @@
         "claude-watch-signals.js",
         "content-chatgpt.js"
       ],
+      "run_at": "document_idle"
+    },
+    {
+      "comment": "Deep-research frame observer (v0.5.7). ChatGPT renders the deep-research progress card in a CROSS-ORIGIN sandboxed iframe (connector_openai_deep_research.web-sandbox.oaiusercontent.com) that the parent-page content script cannot see into — the Stop-research button lives there. This script runs INSIDE such frames (all_frames) and relays ONLY that button's visibility (a boolean, structural — never content) to background.js over a port. Frames that never show the button (canvas/textdocs sandboxes) stay completely silent — the port connects lazily on first sighting.",
+      "matches": [
+        "https://*.oaiusercontent.com/*"
+      ],
+      "js": [
+        "content-dr-frame.js"
+      ],
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
       "run_at": "document_idle"
     }
   ],

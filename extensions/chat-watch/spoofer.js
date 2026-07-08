@@ -72,26 +72,60 @@
 
     const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     const GEMINI_C_RE = /\b(c_[0-9a-z]{6,}|rc_[0-9a-z]{6,})\b/ig;
+    // Claude deep-research task-status poll (mirror of lib/browser_stream_signals.js). Done lives in
+    // the JSON body's status enum, which webRequest can't read — so we sniff it here.
+    const CLAUDE_TASK_STATUS_RE = /\/chat_conversations\/([^/]+)\/task\/wf-[^/]+\/status/i;
+    const CLAUDE_TASK_DONE_STATES = new Set([
+      'completed', 'complete', 'done', 'succeeded', 'success', 'finished',
+      'failed', 'error', 'errored', 'cancelled', 'canceled', 'stopped',
+    ]);
+    function isClaudeTaskStatusEndpoint(url) {
+      return CLAUDE_TASK_STATUS_RE.test(String(url || ''));
+    }
+    function claudeConversationIdFromUrl(url) {
+      const m = String(url || '').match(CLAUDE_TASK_STATUS_RE);
+      return m ? m[1].toLowerCase() : '';
+    }
 
     function streamProviderForUrl(url) {
       const s = String(url || '');
+      // ANCHORED (findings §3.2): only the real generation stream POST (`/backend-api/conversation`
+      // or `/backend-api/f/conversation`, nothing after) is sniffed. The old `\b` match also teed
+      // `/f/conversation/prepare`, `/conversation/init`, `/conversation/<id>/stream_status` and
+      // `/conversation/<id>/textdocs` — housekeeping whose end_of_stream markers polluted the
+      // activity-quiescence ground truth (a GT done at 0.4s from a page-load /prepare).
       if (/chatgpt\.com|chat\.openai\.com|\/backend-api\/(f\/)?conversation/i.test(s)) {
-        if (/\/backend-api\/(f\/)?conversation\b/i.test(s)) return 'chatgpt';
+        if (/\/backend-api\/(f\/)?conversation(\?|$)/i.test(s)) return 'chatgpt';
       }
-      if (/\/chat_conversations\/[^/]+\/completion/i.test(s)) return 'claude';
+      if (/\/chat_conversations\/[^/]+\/completion/i.test(s) || isClaudeTaskStatusEndpoint(s)) return 'claude';
       if (/StreamGenerate/i.test(s)) return 'gemini';
       return null;
     }
 
-    function streamEndpointFamily(provider) {
+    // Host-only provider match for realtime channels (WebSocket / EventSource). ChatGPT's handoff
+    // architecture (2026-07: `stream_handoff` / `resume_conversation_token` frames) can move the
+    // real token stream off the `/f/conversation` POST onto a channel that webRequest and the fetch
+    // hook never see — so realtime channels are sniffed by provider HOST, not endpoint path.
+    function streamProviderForRealtimeUrl(url) {
+      try {
+        const u = new URL(String(url || ''), location.href);
+        const host = u.hostname || '';
+        if (/(^|\.)chatgpt\.com$|(^|\.)chat\.openai\.com$/i.test(host)) return 'chatgpt';
+        if (/(^|\.)claude\.ai$/i.test(host)) return 'claude';
+        if (host === 'gemini.google.com') return 'gemini';
+      } catch (_) { /* ignore */ }
+      return null;
+    }
+
+    function streamEndpointFamily(provider, url) {
       if (provider === 'chatgpt') return 'backend-api/conversation';
-      if (provider === 'claude') return 'chat_conversations/completion';
+      if (provider === 'claude') return isClaudeTaskStatusEndpoint(url) ? 'chat_conversations/task_status' : 'chat_conversations/completion';
       if (provider === 'gemini') return 'StreamGenerate';
       return 'unknown';
     }
 
     // Scan a chunk for STRUCTURAL fields only — mirror of lib/browser_stream_signals.js. Mutates acc.
-    function streamScanChunk(provider, text, acc) {
+    function streamScanChunk(provider, text, acc, url) {
       const s = String(text || '');
       if (provider === 'chatgpt') {
         let m = s.match(/"conversation_id"\s*:\s*"([^"]+)"/i);
@@ -101,7 +135,16 @@
         if (/stream_handoff|resume_conversation_token/i.test(s)) acc.markers.add('stream_handoff');
         if (/\bdata:\s*\[DONE\]/i.test(s)) acc.markers.add('[DONE]');
       } else if (provider === 'claude') {
-        if (/"type"\s*:\s*"message_stop"/i.test(s) || /\bevent:\s*message_stop\b/i.test(s)) {
+        if (isClaudeTaskStatusEndpoint(url)) {
+          // Deep-research status poll: read the status ENUM value(s) only (never content).
+          const re = /"(?:status|state|task_status|workflow_status|run_status|task_state)"\s*:\s*"([a-z_]{3,30})"/ig;
+          let mm;
+          while ((mm = re.exec(s)) !== null) {
+            const value = mm[1].toLowerCase();
+            acc.markers.add('task_status:' + value);
+            if (CLAUDE_TASK_DONE_STATES.has(value)) acc.markers.add('task_completed');
+          }
+        } else if (/"type"\s*:\s*"message_stop"/i.test(s) || /\bevent:\s*message_stop\b/i.test(s)) {
           acc.markers.add('message_stop');
         }
       } else if (provider === 'gemini') {
@@ -113,14 +156,23 @@
       }
     }
 
-    function emitStreamSignals(provider, method, acc) {
+    function emitStreamSignals(provider, method, acc, url, opts) {
+      const o = opts || {};
       const base = {
         provider,
-        conversation_id: acc.conversation_id || '',
+        conversation_id: acc.conversation_id || claudeConversationIdFromUrl(url) || '',
         turn_id: acc.turn_id || '',
-        endpoint: streamEndpointFamily(provider),
+        endpoint: o.endpoint || streamEndpointFamily(provider, url),
         method: method || 'POST',
         t: Date.now(),
+        // Whether a stream_handoff/resume_conversation_token frame appeared in the SAME body. A
+        // handoff body can end with an early `data: [DONE]` while the reply keeps streaming
+        // elsewhere, so consumers must not treat its [DONE] as the turn's done (findings §3.1).
+        handoff: acc.markers.has('stream_handoff') || acc.handoff === true,
+        // How long the sniffed body streamed (ms; 0 = unknown/not applicable). A real full-stream
+        // body ends at the turn's true finish (tens of seconds); a handoff body ends in ~1-2s. The
+        // hidden-tab done heuristic in background.js keys off this.
+        body_ms: Number.isFinite(o.bodyMs) && o.bodyMs >= 0 ? Math.round(o.bodyMs) : 0,
       };
       const markers = acc.markers.size ? Array.from(acc.markers) : (base.conversation_id ? ['conversation_id'] : []);
       for (const marker of markers) {
@@ -136,8 +188,10 @@
     // original response on its own stream; this `stream` belongs to our clone, so we read it
     // directly — no inner tee needed (teeing here would leave an unread branch that stalls the
     // reader via backpressure). Decoder output is scanned then discarded.
-    function sniffReadableStream(provider, method, stream) {
+    function sniffReadableStream(provider, method, stream, url) {
       const acc = { conversation_id: '', turn_id: '', markers: new Set() };
+      const isTaskStatus = isClaudeTaskStatusEndpoint(url);
+      const startedAt = Date.now();
       (async () => {
         try {
           const reader = stream.getReader();
@@ -149,14 +203,17 @@
             const { value, done } = await reader.read();
             if (done) break;
             const chunk = typeof value === 'string' ? value : decoder.decode(value, { stream: true });
-            streamScanChunk(provider, tail + chunk, acc);
+            streamScanChunk(provider, tail + chunk, acc, url);
             tail = (tail + chunk).slice(-4096);
           }
-          acc.markers.add('end_of_stream');
-          emitStreamSignals(provider, method, acc);
+          // The body simply ending is a done edge for streamed generations — but NOT for the claude
+          // task-status poll, where each poll's body ends every few seconds (its done lives in the
+          // status enum, handled by streamScanChunk).
+          if (!isTaskStatus) acc.markers.add('end_of_stream');
+          emitStreamSignals(provider, method, acc, url, { bodyMs: Date.now() - startedAt });
         } catch (_) {
           // Stream errored/aborted — still emit whatever structural fields we captured.
-          try { emitStreamSignals(provider, method, acc); } catch (__) { /* ignore */ }
+          try { emitStreamSignals(provider, method, acc, url, { bodyMs: Date.now() - startedAt }); } catch (__) { /* ignore */ }
         }
       })();
     }
@@ -177,8 +234,8 @@
         //      spoofer.js in the extension's error panel. We were only ever an innocent frame on
         //      those; this removes the frame for the requests we don't care about.
         let provider = null;
+        let url = '';
         if (streamSniffEnabled) {
-          let url = '';
           try {
             url = typeof input === 'string' ? input : (input && input.url) || '';
           } catch (_) { url = ''; }
@@ -199,7 +256,7 @@
               let clone = null;
               try { clone = response.clone(); } catch (_) { clone = null; }
               if (clone && clone.body) {
-                sniffReadableStream(provider, method, clone.body);
+                sniffReadableStream(provider, method, clone.body, url);
               }
             }
           } catch (_) { /* never break the page */ }
@@ -227,14 +284,16 @@
             const url = this.__chatWatchStreamUrl || '';
             const provider = streamProviderForUrl(url);
             if (provider) {
+              const sentAt = Date.now();
               this.addEventListener('load', () => {
                 try {
                   let text = '';
                   try { text = this.responseType === '' || this.responseType === 'text' ? this.responseText : ''; } catch (_) { text = ''; }
                   const acc = { conversation_id: '', turn_id: '', markers: new Set() };
-                  streamScanChunk(provider, text, acc);
-                  acc.markers.add('end_of_stream');
-                  emitStreamSignals(provider, this.__chatWatchStreamMethod || 'GET', acc);
+                  streamScanChunk(provider, text, acc, url);
+                  // Not a done edge for the claude task-status poll (each poll completes; see fetch path).
+                  if (!isClaudeTaskStatusEndpoint(url)) acc.markers.add('end_of_stream');
+                  emitStreamSignals(provider, this.__chatWatchStreamMethod || 'GET', acc, url, { bodyMs: Date.now() - sentAt });
                 } catch (_) { /* ignore */ }
               });
             }
@@ -242,6 +301,100 @@
         } catch (_) { /* never break the page */ }
         return originalSend.apply(this, arguments);
       };
+    }
+
+    // ── Realtime channels: WebSocket / EventSource (structural-only, same privacy contract) ──
+    //
+    // ChatGPT's resumable/handoff streaming (2026-07) can end the `/f/conversation` POST ~1-2s in
+    // (its body closes with `stream_handoff` frames + an early `data: [DONE]`) while the real reply
+    // keeps streaming on a channel invisible to both chrome.webRequest and the fetch/XHR hooks
+    // above. Observing that channel restores a network-side done that works foreground AND on a
+    // hidden tab (findings §3.1). Same rules as the fetch hook: gated on the opt-in flag at
+    // scan time, narrow structural regexes only, frame text discarded immediately.
+    //
+    // Per-frame semantics: a realtime channel has no natural body end mid-conversation, so markers
+    // are emitted as they appear (the terminal [DONE]/message_stop IS the live done edge) and the
+    // marker set resets after each emit so a later turn's terminal frame emits again. A short
+    // re-emit throttle keeps a burst of frames from duplicating the same marker.
+    const REALTIME_MARKER_REEMIT_MS = 3000;
+    function sniffRealtimeChannel(provider, channelLabel, target, url) {
+      const acc = { conversation_id: '', turn_id: '', markers: new Set(), handoff: false };
+      const openedAt = Date.now();
+      const lastEmitAtByMarker = new Map();
+      const emitFresh = () => {
+        if (acc.markers.has('stream_handoff')) acc.handoff = true; // sticky across frames
+        const now = Date.now();
+        const fresh = Array.from(acc.markers).filter(
+          (m) => now - (lastEmitAtByMarker.get(m) || 0) > REALTIME_MARKER_REEMIT_MS
+        );
+        acc.markers.clear();
+        if (!fresh.length) return;
+        for (const m of fresh) lastEmitAtByMarker.set(m, now);
+        emitStreamSignals(
+          provider,
+          channelLabel,
+          { conversation_id: acc.conversation_id, turn_id: acc.turn_id, markers: new Set(fresh), handoff: acc.handoff },
+          url,
+          { endpoint: `realtime:${channelLabel.toLowerCase()}`, bodyMs: now - openedAt }
+        );
+      };
+      const scanFrame = (data) => {
+        try {
+          if (!streamSniffEnabled || typeof data !== 'string' || !data) return;
+          streamScanChunk(provider, data, acc, url);
+          emitFresh();
+        } catch (_) { /* never break the page */ }
+      };
+      try {
+        target.addEventListener('message', (ev) => scanFrame(ev && ev.data));
+        const onEnd = () => {
+          try {
+            if (!streamSniffEnabled) return;
+            acc.markers.add('end_of_stream');
+            emitFresh();
+          } catch (_) { /* ignore */ }
+        };
+        if (channelLabel === 'WS') target.addEventListener('close', onEnd);
+        else target.addEventListener('error', onEnd); // EventSource: error fires on close/drop
+      } catch (_) { /* ignore */ }
+    }
+
+    const OriginalWebSocket = window.WebSocket;
+    if (typeof OriginalWebSocket === 'function') {
+      const PatchedWebSocket = function WebSocket(url, protocols) {
+        const ws = protocols === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocols);
+        try {
+          // Attach unconditionally for provider hosts; scanFrame re-checks the opt-in flag per
+          // frame (the flag can arrive after page-load sockets are already open).
+          const provider = streamProviderForRealtimeUrl(url);
+          if (provider) sniffRealtimeChannel(provider, 'WS', ws, String(url || ''));
+        } catch (_) { /* never break the page */ }
+        return ws;
+      };
+      try {
+        PatchedWebSocket.prototype = OriginalWebSocket.prototype;
+        for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) PatchedWebSocket[k] = OriginalWebSocket[k];
+      } catch (_) { /* ignore */ }
+      window.WebSocket = PatchedWebSocket;
+    }
+
+    const OriginalEventSource = window.EventSource;
+    if (typeof OriginalEventSource === 'function') {
+      const PatchedEventSource = function EventSource(url, config) {
+        const es = config === undefined ? new OriginalEventSource(url) : new OriginalEventSource(url, config);
+        try {
+          // Best-effort: only unnamed `message` events are observed (named SSE events would need
+          // per-type listeners we can't enumerate) — enough for id/terminal-marker scanning.
+          const provider = streamProviderForRealtimeUrl(url);
+          if (provider) sniffRealtimeChannel(provider, 'SSE', es, String(url || ''));
+        } catch (_) { /* never break the page */ }
+        return es;
+      };
+      try {
+        PatchedEventSource.prototype = OriginalEventSource.prototype;
+        for (const k of ['CONNECTING', 'OPEN', 'CLOSED']) PatchedEventSource[k] = OriginalEventSource[k];
+      } catch (_) { /* ignore */ }
+      window.EventSource = PatchedEventSource;
     }
 
   } catch (e) {

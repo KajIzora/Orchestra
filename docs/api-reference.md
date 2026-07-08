@@ -43,6 +43,7 @@ The server listens on `http://127.0.0.1:<port>` (or the host/port you configured
 | `GET`    | `/api/browser-chats?provider=`             | Extension tab snapshots |
 | `POST`   | `/api/browser-chats/snapshot`             | Header `X-Browser-Chat-Token` |
 | `POST`   | `/api/browser-chats/complete`             | Header `X-Browser-Chat-Token` |
+| `POST`   | `/api/browser-chats/cancel`               | Header `X-Browser-Chat-Token`; ChatGPT/Claude/Gemini explicit cancel clear |
 
 When `workspace_items` is supplied on project create/update, the server normalizes those rows and regenerates `workspace_commands`. Project `launch_command` / `launch_commands` are legacy compatibility fields; when supplied, they are folded into custom workspace targets unless an equivalent target already exists.
 

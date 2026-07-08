@@ -44,6 +44,7 @@ const {
   REMOTE_HOOKS_JSON_PATH,
   REMOTE_HOOK_LOG_PATH,
 } = require('./lib/remote_cursor_tracker');
+const { wrapNonOverlapping } = require('./lib/poll_guard');
 const {
   normalizeStoredCursorRemotes,
   assignProjectCursorRemotes,
@@ -56,7 +57,13 @@ const {
   shouldApplyCursorHookCompletionNow,
   touchCursorSubagentWatchOnSpawn,
   initializeMultitaskSubagentWatchOnLink,
+  listSubagentTranscriptPathsForWatch,
 } = require('./lib/cursor_multitask_subagent');
+const {
+  createCursorCliStoreDbPermissionProbe,
+  createSshCursorCliHeadGateReader,
+} = require('./lib/cursor_cli_permission_probe');
+const { createCursorHookIngest } = require('./lib/cursor_hook_ingest');
 const {
   createWatchPoller,
   normalizeWatchTracking,
@@ -71,8 +78,9 @@ const {
   markCancelledWatchClear,
   resumeWatchTracking,
   isPermissionAttentionReason,
+  cursorCompletedHintContinuationGate,
 } = require('./lib/watch_tracker');
-const { createBrowserChatStore, applyBrowserChatCompletion, applyBrowserChatResume } = require('./lib/browser_chat');
+const { createBrowserChatStore, applyBrowserChatCompletion, applyBrowserChatResume, BROWSER_CHAT_RESUME_QUIET_MS } = require('./lib/browser_chat');
 const { createCursorHookStore, normalizeConversationId } = require('./lib/cursor_hook_store');
 const {
   createCursorCliPermissionTracker,
@@ -80,9 +88,11 @@ const {
   loadCursorCliConfigRemote,
   isCursorCliHook,
 } = require('./lib/cursor_cli_permission');
-const { createCursorChatDbReader, remotePendingAskQuestion } = require('./lib/cursor_chat_db');
+const { createCursorChatDbReader, remotePendingAskQuestion, findChatDbDir } = require('./lib/cursor_chat_db');
+const { createCursorCliContinuationWatcher } = require('./lib/cursor_cli_continuation');
 const { createRendererPermissionProbe } = require('./lib/cursor_renderer_permission_probe');
 const { createAgentExecPermissionProbe } = require('./lib/cursor_agent_exec_probe');
+const { createComposerHeadersGateProbe } = require('./lib/cursor_subagent_gate_probe');
 const { applyCursorRendererPermissionEvents } = require('./lib/cursor_renderer_watch');
 const { createHookEventLog } = require('./lib/hook_event_log');
 const { createCodexHookStore } = require('./lib/codex_hook_store');
@@ -92,8 +102,23 @@ const { ensureRemoteCodexHooks } = require('./lib/remote_codex_hooks');
 const { createClaudeHookStore, normalizeSessionId } = require('./lib/claude_hook_store');
 const { getClaudeTaskAppHookScript } = require('./lib/claude_hook_script');
 const { buildHookForwarderBlock } = require('./lib/hook_forwarder');
-const { createGeminiHookStore } = require('./lib/gemini_hook_store');
+const { createGeminiHookStore, isGeminiFreshGenerationEvent, AGY_CANCEL_CONFIRM_MS } = require('./lib/gemini_hook_store');
 const { buildGeminiPollerDeps } = require('./lib/gemini_poller_deps');
+const { createLocalAgyDbStatusTracker, createRemoteAgyDbStatusTracker } = require('./lib/antigravity_db_status');
+const {
+  getAgyCliConversationsDir: agyCliConversationsDirForStatus,
+  getAgyAppConversationsDir: agyAppConversationsDirForStatus,
+} = require('./lib/antigravity_cli_tracker');
+// agy conversation-DB step-status tracker: cached sqlite reads over both surfaces' conversation
+// dirs (cli + app). Feeds the gemini cascade busy/settle refinement — see antigravity_db_status.
+const agyDbStatusTracker = createLocalAgyDbStatusTracker({
+  conversationsDirs: [agyCliConversationsDirForStatus(), agyAppConversationsDirForStatus()],
+});
+// ssh parity for the DB step-status channel: per-host cache over the REMOTE conversation DBs,
+// background-refreshed from pollRemoteHookLogs (scoped to the active ssh gemini watches + their
+// cascade sub-agents) and routed per watch via the poller deps' dbStatusForWatch. Cold cache /
+// ssh failure read as {present:false} — pure hook inference, same as a host with no DB access.
+const agyRemoteDbStatusTracker = createRemoteAgyDbStatusTracker();
 const { parseSubAgentChildren } = require('./lib/antigravity_subagents');
 const { getAntigravityBrainRoots, transcriptPathFromArtifactDirectory } = require('./lib/antigravity_hook_signals');
 const { getGeminiTaskAppHookScript } = require('./lib/gemini_hook_script');
@@ -113,6 +138,9 @@ const { getHookEventsForProfile, normalizeHookProfile } = require('./lib/signal_
 const {
   assertAllowedCodexTranscriptPath,
   codexWatchShouldClearSince,
+  codexSubagentStateSince,
+  codexAgentRolloutFacts,
+  createRemoteCodexAgentRolloutCache,
   assertAllowedRemoteCodexTranscriptPath,
   remoteCodexWatchShouldClearSince,
   enrichCodexPickerRunWithTranscript,
@@ -124,13 +152,19 @@ const {
   claudePausedWatchShouldCancel,
   assertAllowedClaudeTranscriptPath,
   assertAllowedRemoteClaudeTranscriptPath,
+  discoverRemoteClaudeRuns,
   remoteClaudeWatchCompletionSince,
   claudeTranscriptWatchCompletionSince,
   enrichClaudeHookPickerRuns,
   claudeWatchActiveGenerationSince,
   remoteClaudeWatchActiveGenerationSince,
 } = require('./lib/claude_tracker');
-const { pickerRunsFromClaudeSnapshots } = require('./lib/claude_picker_from_hooks');
+const { createClaudeHookFeedStalenessProbe } = require('./lib/claude_hook_feed_staleness');
+const {
+  pickerRunsFromClaudeSnapshots,
+  remoteHostsNeedingClaudeDiscovery,
+  mergeClaudeDiscoveryPickerRuns,
+} = require('./lib/claude_picker_from_hooks');
 const { pickerRunsFromGeminiSnapshots } = require('./lib/gemini_picker_from_hooks');
 const {
   readLocalAgyCliCancelSignals,
@@ -180,6 +214,7 @@ const { listLocalProcesses, listRemoteProcesses } = require('./lib/process_track
 const { getLatestNotificationRecId } = require('./lib/notification_center');
 const {
   createRemoteHookTunnelManager,
+  isStableInstance,
   preferredRemoteTunnelPort,
 } = require('./lib/remote_hook_tunnel');
 
@@ -202,8 +237,11 @@ const HOOK_AUTHED_WRITE_PREFIXES = [
   '/api/browser-chats/snapshot',
   '/api/browser-chats/stream-signal',
   '/api/browser-chats/tab-closed',
+  '/api/browser-chats/tabs-sync',
   '/api/browser-chats/complete',
+  '/api/browser-chats/cancel',
   '/api/browser-chats/drive',
+  '/api/browser-chats/open',
 ];
 
 function serverExposesNonLocalBind() {
@@ -301,11 +339,35 @@ function resolveCursorCliConfig(body) {
 const cursorCliPermissionTracker = createCursorCliPermissionTracker({
   resolveConfig: resolveCursorCliConfig,
 });
+// Per-conversation cursor-CLI hook body (workspace_roots/cwd/source/host), fed from every cursor-CLI
+// hook. The store.db permission probe resolves each watch's permission config off the conversation id
+// alone (the watch tracking object doesn't carry workspace roots), so it needs this side-channel.
+const cursorCliHookBodyByConv = new Map();
+// A conversation is LOCAL cursor-CLI iff it has a ~/.cursor/chats/<hash>/<conv>/store.db (the IDE keeps
+// its chat in state.vscdb, so IDE conversations never match; ssh runs keep the store.db on the remote,
+// so those don't match locally either — exactly the set the store.db probe should own). Cached: a
+// found dir is stable; a miss is re-checked after a short TTL (the dir materializes after link).
+const cursorCliChatDbDirCache = new Map(); // conv -> { dir, at }
+function localCursorCliStoreDbPath(conversationId) {
+  const conv = String(conversationId || '').trim();
+  if (!conv) return '';
+  const cached = cursorCliChatDbDirCache.get(conv);
+  const now = Date.now();
+  if (cached && cached.dir) return path.join(cached.dir, 'store.db');
+  if (cached && now - cached.at < 5000) return '';
+  let dir = '';
+  try { dir = findChatDbDir(conv) || ''; } catch { dir = ''; }
+  cursorCliChatDbDirCache.set(conv, { dir, at: now });
+  return dir ? path.join(dir, 'store.db') : '';
+}
 // cursor-CLI question gate: cursor emits NO hook and only a DELAYED transcript AskQuestion (written
 // after the answer), but the chat store.db carries the pending question the instant the gate renders.
 // This reader returns "is the head a pending AskQuestion" for a tracked conversation (local-only,
 // mtime-gated, linked_at-gated). It AUGMENTS the transcript path (see getCursorChatDbQuestionHint).
 const cursorChatDbReader = createCursorChatDbReader();
+// cursor-cli final-turn gate state (open sub-agent transcripts / queued system-notification
+// blobs / terminal task files) — see lib/cursor_cli_continuation.js.
+const cursorCliContinuationWatcher = createCursorCliContinuationWatcher();
 // `--source ssh` cursor-cli runs the agent headless on the REMOTE, so its chat store.db is on the
 // remote. The watch poll's chat-db hint is synchronous, so (like the remote CLI-config above) we keep
 // a small cache and refresh it in the background over ssh; a cold miss returns false (no early signal
@@ -322,6 +384,13 @@ function scheduleRemoteCursorChatDbRefresh(key, host, conv, sinceMs) {
     .finally(() => { cursorChatDbRemoteFetches.delete(key); });
 }
 const codexHookStore = createCodexHookStore({ token: resolveHookToken('CODEX_HOOK_TOKEN', 'codex') });
+// `--source ssh` codex watches: a hook-silent spawn_agent worker's rollout lives on the REMOTE
+// host, so the local worker-rollout read (codexAgentRolloutFacts) can never see it. The watch
+// tick must never block on a cold ssh exec, so worker facts are served from this background-
+// refreshed cache (lib/codex_tracker createRemoteCodexAgentRolloutCache): cold cache → null (the
+// done-hold degrades to the 30s quiet backstop, today's behavior), warm cache → precise
+// hold/release from the remote rollout. See getCodexSubagentRolloutStatus in the poller deps.
+const codexRemoteRolloutCache = createRemoteCodexAgentRolloutCache();
 const claudeHookStore = createClaudeHookStore({
   token: resolveHookToken('CLAUDE_HOOK_TOKEN', 'claude'),
   requireEmptySessionCronsForStop: true,
@@ -329,6 +398,26 @@ const claudeHookStore = createClaudeHookStore({
   // watch flips to done; an idle Stop clears immediately. Resume within the window stays
   // tracking; after it, "done" was shown and tracking re-arms (flicker). Tunable via env.
   stopDebounceMs: Number.parseInt(process.env.CLAUDE_STOP_DEBOUNCE_MS || '', 10) || 15000,
+  // Busy-hold backstop for a Stop that leaves a background SHELL task running (store default
+  // 30min). The cap is the crash/eternal-task BACKSTOP, not the clearing mechanism — the
+  // task-exit notification is the real completion signal. Tunable while the telemetry below
+  // gathers real resolution data.
+  backgroundTaskHoldMs: Number.parseInt(process.env.CLAUDE_BACKGROUND_TASK_HOLD_MS || '', 10) || undefined,
+  // Todo-tiered busy-holds (store defaults 3min / 5min): the backstop above only governs a busy
+  // Stop whose session still has pending/in_progress todos (stated remaining work); a completed
+  // todo list holds todoDoneHoldMs, a session that never wrote todos holds noTodoHoldMs.
+  todoDoneHoldMs: Number.parseInt(process.env.CLAUDE_TODO_DONE_HOLD_MS || '', 10) || undefined,
+  noTodoHoldMs: Number.parseInt(process.env.CLAUDE_NO_TODO_HOLD_MS || '', 10) || undefined,
+  // Busy-hold resolution telemetry (stable instance only): grep server logs for
+  // [claude-busy-hold]. resumed = task-exit inside the hold; cap_expired = no signal
+  // (eternal task or dead session). Suppressed on dev to keep ./dev-start.sh output quiet.
+  onBusyHoldEvent: isStableInstance()
+    ? (info) => {
+        console.log(
+          `[claude-busy-hold] ${info.resolution} session=${info.session_id} elapsed_ms=${info.elapsed_ms} hold_ms=${info.hold_ms} todo_state=${info.todo_state}`
+        );
+      }
+    : undefined,
 });
 // Lossless raw-hook tap: keeps exact /event bodies briefly so a signal-recording
 // session can capture them verbatim. In-memory only; never persisted by the server.
@@ -793,7 +882,21 @@ async function listClaudeRunsFromHookStore(project, source) {
       .filter(Boolean);
     return { host: remote.host, projects_root: remote.projects_root, workspaces };
   });
-  const runs = pickerRunsFromClaudeSnapshots(snapshots, { source: 'ssh', remotes: remoteConfigs });
+  let runs = pickerRunsFromClaudeSnapshots(snapshots, { source: 'ssh', remotes: remoteConfigs });
+  // Discovery fallback: with the reverse hook tunnel down at prompt time, no hook snapshot exists
+  // for the host and the remote run would never appear in the picker (arm-never-appears). For each
+  // remote with ZERO snapshot-derived rows, discover runs over ssh directly (find + tail of
+  // ~/.claude/projects) and merge them in — deduped against snapshot rows by transcript/session,
+  // workspace-gated like the snapshot path, and stamped with host/remote_host for host-gating.
+  for (const remote of remoteHostsNeedingClaudeDiscovery(runs, remoteConfigs)) {
+    let discovered = [];
+    try {
+      discovered = await discoverRemoteClaudeRuns(remote);
+    } catch {
+      discovered = []; // ssh unreachable — keep the snapshot-only rows
+    }
+    runs = mergeClaudeDiscoveryPickerRuns(runs, discovered, remote);
+  }
   return {
     runs: await enrichClaudeHookPickerRuns(runs, snapshots),
     error: null,
@@ -886,6 +989,12 @@ function completeWatchTask(task) {
   task.cursor_tracking = null;
   // Retains the watcher in paused_watch_tracking when this was a needs-input stop.
   recordWatchFinished(task, wt);
+}
+
+function cancelWatchTask(task) {
+  const wt = task.watch_tracking || task.cursor_tracking || null;
+  markCancelledWatchClear(wt);
+  completeWatchTask(task);
 }
 
 // User chose "Set to done" in the tracking modal — show the green "done" pill without
@@ -1725,7 +1834,13 @@ function applyGeminiHookCompletion(getState, onEachTask, snapshot, options = {})
     snapshot.generating === false &&
     snapshot.event_source_kind !== 'scan' &&
     snapshot.source_kind !== 'scan';
-  const isAgyCancel = snapshot.cancel_hint === true;
+  // Suspend/reschedule guard: a cancel is only actionable once it has aged past the store's
+  // confirmation window (AGY_CANCEL_CONFIRM_MS) without a fresh generation clearing it. At hook
+  // ingest the cancel is always fresh, so this push path never acts on it — the watch poller
+  // (getGeminiCancelHint, same window) confirms it ~1.5–3.5s later. The antigravity app's wakeup
+  // mechanism cancels-then-resumes within ~0.5s, which used to false-cancel checkin runs here.
+  const cancelAgeMs = Date.now() - (Date.parse(snapshot.cancel_hint_at || snapshot.updated_at || '') || 0);
+  const isAgyCancel = snapshot.cancel_hint === true && cancelAgeMs >= AGY_CANCEL_CONFIRM_MS;
   const isPermissionPending =
     (snapshot.event_name === 'Notification' && snapshot.notification_type === 'ToolPermission') ||
     snapshot.permission_pending === true;
@@ -2163,51 +2278,61 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     res.json({ ok: true, snapshot: result.snapshot });
   });
 
-  app.post('/api/cursor-hooks/event', (req, res) => {
-    if (!cursorHookStore.verifyToken(req)) {
-      return res.status(401).json({ error: 'Invalid or missing cursor hook token' });
-    }
-    const body = req.body || {};
-    hookEventLog.push('cursor', body);
-    // cursor-CLI permission inference: feed tool-call hooks (preToolUse/postToolUse/…) to the
-    // config-eval tracker. CLI-only (IDE uses its own permission probes). These events are not
-    // lifecycle events for cursorHookStore, so they'd be rejected below — the tracker is the
-    // consumer and we ack them.
-    if (isCursorCliHook(body)) {
-      try {
-        cursorCliPermissionTracker.ingest(body);
-      } catch (err) {
-        console.error('[server] cursor-cli permission ingest:', err.message);
-      }
-    }
-    const result = cursorHookStore.ingestEvent(body);
-    if (!result.ok) {
-      // Tool-call / non-lifecycle hooks (preToolUse, postToolUse, …) are consumed by the
-      // permission tracker above; ack them so the forwarder doesn't see a 4xx.
-      return res.json({ ok: true, ignored: result.error });
-    }
-    const eventName = body.event_name || body.hook_event_name || '';
-    const isStart = eventName === 'beforeSubmitPrompt' || eventName === 'sessionStart';
-    let resumed = 0;
-    if (isStart && result.snapshot?.generating) {
-      resumed = applyCursorHookResume(
+  // ONE cursor hook ingestion path (raw tap → CLI permission tracker + continuation gate → hook
+  // store → resume/spawn/completion), shared by this POST route and the ssh remote-log poll in
+  // main() so both deliveries feed the SAME consumers. Cross-path dedup lives inside: a remote
+  // event that arrives via BOTH the reverse tunnel POST and the polled remote log processes
+  // exactly once (see lib/cursor_hook_ingest.js).
+  const cursorHookIngest = createCursorHookIngest({
+    hookEventLog,
+    cursorHookStore,
+    isCursorCliHook,
+    cursorCliHookBodyByConv,
+    cursorCliPermissionTracker,
+    cursorCliContinuationWatcher,
+    applyCursorHookResume: (snapshot) =>
+      applyCursorHookResume(
         () => storage.getState(),
         (task, wt) => {
           resumeWatchTracking(task, wt, (t, status) => { t.status = status; });
         },
-        result.snapshot
-      );
+        snapshot
+      ),
+    applyCursorSubagentWatchOnSpawn: (body) => applyCursorSubagentWatchOnSpawn(() => storage.getState(), body),
+    applyCursorHookCompletion: (snapshot) =>
+      applyCursorHookCompletion(
+        () => storage.getState(),
+        (task) => {
+          completeWatchTask(task);
+        },
+        snapshot
+      ),
+    onError: (what, err) => console.error(`[server] ${what}:`, err.message),
+  });
+
+  app.post('/api/cursor-hooks/event', async (req, res) => {
+    if (!cursorHookStore.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing cursor hook token' });
     }
-    const activated = applyCursorSubagentWatchOnSpawn(() => storage.getState(), body);
-    const completed = applyCursorHookCompletion(
-      () => storage.getState(),
-      (task) => {
-        completeWatchTask(task);
-      },
-      result.snapshot
-    );
-    if (resumed > 0 || activated > 0 || completed > 0) storage.save();
-    return res.json({ ok: true, completed, activated, resumed, snapshot: result.snapshot });
+    const body = req.body || {};
+    const out = await cursorHookIngest.ingest(body, { via: 'post' });
+    if (out.deduped) {
+      // Already processed via the ssh remote-log poll — ack without double-feeding consumers.
+      return res.json({ ok: true, deduped: true });
+    }
+    if (out.ignored) {
+      // Tool-call / non-lifecycle hooks (preToolUse, postToolUse, …) are consumed by the
+      // permission tracker inside ingest; ack them so the forwarder doesn't see a 4xx.
+      return res.json({ ok: true, ignored: out.ignored });
+    }
+    if ((out.resumed || 0) > 0 || (out.activated || 0) > 0 || (out.completed || 0) > 0) storage.save();
+    return res.json({
+      ok: true,
+      completed: out.completed,
+      activated: out.activated,
+      resumed: out.resumed,
+      snapshot: out.snapshot,
+    });
   });
 
   app.get('/api/cursor-hooks/snapshots', (req, res) => {
@@ -2359,6 +2484,12 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
       result.snapshot,
       {
         resumeTask: (task, pausedWt) => resumeWatchTracking(task, pausedWt, applyTaskStatusChange),
+        // Hold the instant Stop-clear while a sub-agent of this session is still working; the
+        // watch poller releases it at the sub-agent's completion notification (or quiet backstop).
+        holdDoneForSubagents: (snapshot) => codexHookStore.hasOpenSubagentWork(snapshot),
+        // Hold the instant Stop-clear while a self-scheduled near-future heartbeat is pending —
+        // the agent yielded to its own wakeup (codex-desktop background-wakeup false-clear).
+        holdDoneForHeartbeat: (snapshot) => codexHookStore.hasPendingHeartbeat(snapshot),
       }
     );
     if (resumed > 0 || completed > 0) storage.save();
@@ -2632,7 +2763,8 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
         (task, wt) => {
           resumeWatchTracking(task, wt, (t, status) => { t.status = status; });
         },
-        result.snapshot
+        result.snapshot,
+        { subAgentIds: geminiCollectSubAgentIds }
       );
     }
     const completed = applyGeminiHookCompletion(
@@ -2666,7 +2798,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     }
     return touched;
   }
-  function applyCursorHookCompletion(getState, onEachTask, snapshot) {
+  async function applyCursorHookCompletion(getState, onEachTask, snapshot) {
     if (!snapshot || !snapshot.completion_hint) return 0;
     let completedCount = 0;
     const targetTranscript = typeof snapshot.transcript_path === 'string' ? snapshot.transcript_path : '';
@@ -2683,6 +2815,17 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
         if (!transcriptMatch && !conversationMatch) continue;
         const conversationSnap = cursorHookStore.getConversationSnapshotForTracking(wt);
         if (!shouldApplyCursorHookCompletionNow(wt, snapshot, conversationSnap)) continue;
+        // cursor-cli: a completed generation stop only clears once the continuation gate agrees
+        // the turn is over (no open sub-agent, no queued system notification); held clears land
+        // via the watch poller instead.
+        if (
+          !(await cursorCompletedHintContinuationGate(wt, snapshot, {
+            getCursorCliContinuationHold: (tracking, hint) =>
+              cursorCliContinuationWatcher.evaluateHold(tracking, hint),
+          }))
+        ) {
+          continue;
+        }
         // An aborted/cancelled terminal status clears straight back to monitor.
         if (snapshot.completion_status === 'aborted' || snapshot.completion_status === 'cancelled') {
           markCancelledWatchClear(wt);
@@ -2761,8 +2904,15 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     }
     return resumedCount;
   }
-  function applyGeminiHookResume(getState, onResumeTask, snapshot) {
+  function applyGeminiHookResume(getState, onResumeTask, snapshot, options = {}) {
     if (!snapshot || !snapshot.generating) return 0;
+    // Done→working re-arm fires ONLY on a fresh generation START (a new turn's PreInvocation, or
+    // a PreToolUse — e.g. a sub-agent resuming real work). Post* wrappers are excluded: agy orders
+    // the invocation-wrapper close (PostInvocation, generating=true) AFTER its terminal fullyIdle
+    // Stop, and re-arming on that trailing close both flips a correctly-finished task back to
+    // working and wipes the completion hint — with no further hooks coming, the task then never
+    // re-completes (stuck "working"). Notification/Stop shapes never re-arm either.
+    if (!isGeminiFreshGenerationEvent(snapshot.event_name)) return 0;
     let resumedCount = 0;
     const targetTranscript = typeof snapshot.transcript_path === 'string' ? snapshot.transcript_path : '';
     const targetSessionId = normalizeSessionId(snapshot.session_id);
@@ -2773,6 +2923,10 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     for (const project of getState().projects || []) {
       for (const task of project.tasks || []) {
         if (task.status === 'waiting') continue;
+        // DONE finishes only: a needs-input pause also records completed_watch_tracking, but its
+        // resume is the gate-precise paused-watch path (shouldResumeIdeAgentWatch) — re-arming here
+        // on the gate tool's own PreToolUse would kill the needs-input hold at the instant it opens.
+        if (task.watch_finished?.needs_input) continue;
         const wt = task.completed_watch_tracking;
         if (!wt || wt.kind !== 'ide_agent' || (wt.provider !== 'gemini' && wt.provider !== 'gemini_cli')) continue;
         const watchHost = typeof wt.host === 'string' ? wt.host.trim() : '';
@@ -2781,7 +2935,20 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
         const watchSessionId = normalizeSessionId(wt.session_id);
         const transcriptMatch = targetTranscript && watchTranscript && targetTranscript === watchTranscript;
         const sessionMatch = targetSessionId && watchSessionId && targetSessionId === watchSessionId;
-        if (!transcriptMatch && !sessionMatch) continue;
+        // A cleared parent watch must also re-arm when a KNOWN SUB-AGENT of that watch resumes
+        // (the cascade cleared during a lull, then the child's next burst arrives under the
+        // child's own conversation id) — mirrors the sub-agent matching the completion applier
+        // and the pending-gate hints already do.
+        let subAgentMatch = false;
+        if (!transcriptMatch && !sessionMatch && targetSessionId && typeof options.subAgentIds === 'function') {
+          try {
+            const ids = options.subAgentIds(wt) || [];
+            subAgentMatch = ids.some((id) => normalizeSessionId(id) === targetSessionId);
+          } catch {
+            subAgentMatch = false;
+          }
+        }
+        if (!transcriptMatch && !sessionMatch && !subAgentMatch) continue;
         onResumeTask(task, wt);
         resumedCount += 1;
       }
@@ -3209,20 +3376,40 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     }
     const result = browserChatStore.ingestStreamSignal(req.body || {});
     if (!result.ok) return res.status(400).json({ error: result.error });
-    // If the stream gave us a real conversation id for ChatGPT/Gemini, resume any task that was
-    // watching this (now better-attributed) conversation — same semantics as a generating snapshot.
+    // If the stream gave us a real conversation id, resume any task that was watching this conversation
+    // — but only for a genuinely NEW turn. A turn-terminator marker (end_of_stream/message_stop/[DONE]/
+    // task_completed) or a signal arriving within the quiet window after this conversation just
+    // completed is trailing housekeeping, not a follow-up, and must not re-open the task (the gemini
+    // done→working flap). The DOM /snapshot path stays immediate (no guards).
+    //
+    // Claude is included so a BACKGROUNDED claude follow-up resumes (a hidden tab's DOM goes stale, so
+    // the /snapshot path can't fire — the spoofer's non-terminal `conversation_id` stream marker is the
+    // only resume signal). The terminal-marker filter + 8s quiet window already protect it. NOTE: claude
+    // deep-research emits recurring non-terminal `task_status:active` markers carrying the conversation
+    // id; one arriving >8s after a prior done could resume the task. The two new scenarios are non-DR so
+    // they don't exercise this; harden by also excluding `task_status:`-prefixed markers if DR resume
+    // ever flaps.
     const sig = result.signal;
-    if (sig.conversation_id && (sig.provider === 'chatgpt' || sig.provider === 'gemini')) {
+    if (sig.conversation_id && (sig.provider === 'chatgpt' || sig.provider === 'gemini' || sig.provider === 'claude')) {
       const resumed = applyBrowserChatResume(
         () => storage.getState(),
         (task, wt) => {
           resumeWatchTracking(task, wt, applyTaskStatusChange);
         },
         sig.provider,
-        sig.conversation_id
+        sig.conversation_id,
+        { marker: sig.marker, minQuietMsAfterDoneMs: BROWSER_CHAT_RESUME_QUIET_MS }
       );
       if (resumed > 0) storage.save();
     }
+    res.json({ ok: true });
+  });
+
+  // Drop all retained stream-body signals. The harness calls this before each capture wave so a run's
+  // done-detection (e.g. claude deep-research task_completed) never trips on a prior run's leftover
+  // markers — same staleness fix as probe-logs/clear. Unauthenticated like the other dev-only clears.
+  app.post('/api/browser-chats/stream-signals/clear', (req, res) => {
+    browserChatStore.clearStreamSignals();
     res.json({ ok: true });
   });
 
@@ -3288,8 +3475,55 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
       provider,
       conversation_id
     );
+    // The turn is over — drop any deep-research-in-flight flag for this conversation so it can't
+    // suppress the bare generating:false clear of a follow-up turn (lib/browser_chat.js).
+    browserChatStore.clearDeepResearchInFlightFor(provider, conversation_id);
     if (completed) storage.save();
     res.json({ ok: true, completed });
+  });
+
+  app.post('/api/browser-chats/cancel', (req, res) => {
+    if (!browserChatStore.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing browser chat token' });
+    }
+    const body = req.body || {};
+    const provider = body.provider;
+    const conversation_id =
+      typeof body.conversation_id === 'string' ? body.conversation_id.trim().toLowerCase() : '';
+    if (provider !== 'chatgpt' && provider !== 'claude' && provider !== 'gemini') {
+      return res.status(400).json({ error: 'provider must be "chatgpt", "claude", or "gemini"' });
+    }
+    if (!conversation_id) {
+      return res.status(400).json({ error: 'conversation_id is required' });
+    }
+    const cancelled = applyBrowserChatCompletion(
+      () => storage.getState(),
+      (task) => {
+        cancelWatchTask(task);
+      },
+      provider,
+      conversation_id
+    );
+    // Same in-flight cleanup as /complete: a cancelled deep research is no longer running.
+    browserChatStore.clearDeepResearchInFlightFor(provider, conversation_id);
+    if (cancelled) storage.save();
+    res.json({ ok: true, cancelled });
+  });
+
+  // Reconcile the store with the extension's actual open provider tabs (posted on MV3 worker
+  // start). A tab closed while the worker slept never posts /tab-closed, leaving a phantom
+  // "generating" item + picker row behind forever (findings §3.7). Anything not in the list is
+  // pruned exactly like a /tab-closed for that tab.
+  app.post('/api/browser-chats/tabs-sync', (req, res) => {
+    if (!browserChatStore.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing browser chat token' });
+    }
+    const tabIds = Array.isArray(req.body && req.body.tab_ids) ? req.body.tab_ids : null;
+    if (!tabIds) {
+      return res.status(400).json({ error: 'tab_ids array is required' });
+    }
+    const pruned = browserChatStore.pruneMissingTabs(tabIds);
+    res.json({ ok: true, pruned });
   });
 
   // ── TEST-ONLY browser-chat drive queue (v3-browser-driver) ──────────────────
@@ -3326,6 +3560,9 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
       provider,
       prompt: typeof body.prompt === 'string' ? body.prompt : '',
       deepResearch: !!body.deepResearch,
+      // false = the driver engages DR + sends but does not press Start (chatgpt countdown
+      // auto-starts) — the --no-auto-start validation flow. Default true.
+      autoStart: body.autoStart !== false,
       modeOnly,
       tabId: Number.isInteger(body.tab_id) ? body.tab_id : null,
       enqueued_at: new Date().toISOString(),
@@ -3369,6 +3606,105 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
   // Harness polls for a command's outcome.
   app.get('/api/browser-chats/drive/result/:id', (req, res) => {
     const result = driveResults.get(req.params.id);
+    if (!result) return res.json({ pending: true });
+    res.json({ pending: false, result });
+  });
+
+  // ── TEST-ONLY browser-chat open queue (auto-open waves) ─────────────────────
+  // A SECOND queue, parallel to the drive queue above, that the extension drains
+  // to OPEN windows/tabs (and RELOAD a stuck tab). Kept separate from /drive on
+  // purpose: the drive queue's guardrail is "only sends prompts" — window/tab
+  // management is a different concern, so it gets its own queue rather than a
+  // `kind` field that would blur that guardrail. Same in-memory, dev-only,
+  // token-authed shape as /drive. Commands:
+  //   { kind:'open',   provider, count }        -> one fresh window, `count` tabs
+  //   { kind:'open',   provider, window_id, count } -> `count` tabs in that window
+  //   { kind:'reload', tab_id }                 -> reload a stuck tab (self-heal)
+  //   { kind:'close',  window_id }              -> close a window (cleanup)
+  //   { kind:'ping' }                           -> liveness check (worker awake + draining)
+  //   { kind:'trusted_keys', tab_id, key_sequence } -> trusted CDP key presses for test scenarios
+  let openQueue = [];
+  const openResults = new Map();
+  let openSeq = 0;
+
+  app.post('/api/browser-chats/open', (req, res) => {
+    if (!browserChatStore.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing browser chat token' });
+    }
+    const body = req.body || {};
+    const kind = ['reload', 'close', 'ping', 'activate', 'trusted_keys'].includes(body.kind) ? body.kind : 'open';
+    if (kind === 'open') {
+      if (body.provider !== 'chatgpt' && body.provider !== 'claude' && body.provider !== 'gemini') {
+        return res.status(400).json({ error: 'provider must be "chatgpt", "claude", or "gemini"' });
+      }
+    } else if (kind === 'reload') {
+      if (!Number.isInteger(body.tab_id)) return res.status(400).json({ error: 'tab_id is required for reload' });
+    } else if (kind === 'activate' || kind === 'trusted_keys') {
+      // Both tab activation and trusted-key dispatch target one concrete tab.
+      if (!Number.isInteger(body.tab_id)) return res.status(400).json({ error: `tab_id is required for ${kind}` });
+      if (kind === 'trusted_keys' && (!Array.isArray(body.key_sequence) || !body.key_sequence.length)) {
+        return res.status(400).json({ error: 'key_sequence is required for trusted_keys' });
+      }
+    } else if (kind === 'close') {
+      if (!Number.isInteger(body.window_id)) return res.status(400).json({ error: 'window_id is required for close' });
+    }
+    const keySequence = Array.isArray(body.key_sequence)
+      ? body.key_sequence.map((step) => ({
+        key: typeof step.key === 'string' ? step.key : '',
+        repeat: Number.isInteger(step.repeat) && step.repeat > 0 ? Math.min(step.repeat, 20) : 1,
+        wait_ms: Number.isInteger(step.wait_ms) && step.wait_ms > 0 ? Math.min(step.wait_ms, 60_000) : 0,
+      })).filter((step) => step.wait_ms > 0 || step.key)
+      : [];
+    openSeq += 1;
+    const id = `open-${Date.now()}-${openSeq}`;
+    const command = {
+      id,
+      kind,
+      provider: body.provider || '',
+      count: Number.isInteger(body.count) && body.count > 0 ? body.count : 1,
+      window_id: Number.isInteger(body.window_id) ? body.window_id : null,
+      tab_id: Number.isInteger(body.tab_id) ? body.tab_id : null,
+      // Optional explicit URL for the opened tab(s) (background-probe siblings use a neutral page).
+      url: typeof body.url === 'string' ? body.url : '',
+      key_sequence: keySequence,
+      enqueued_at: new Date().toISOString(),
+    };
+    openQueue.push(command);
+    res.json({ ok: true, id });
+  });
+
+  // Background drains pending open commands (token-authed). Returns and clears them.
+  app.get('/api/browser-chats/open/pending', (req, res) => {
+    if (!browserChatStore.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing browser chat token' });
+    }
+    const commands = openQueue;
+    openQueue = [];
+    res.json({ commands });
+  });
+
+  // Background reports the per-command open outcome (token-authed): the created
+  // window_id + tab_ids (open), or ok/error (reload/close).
+  app.post('/api/browser-chats/open/result', (req, res) => {
+    if (!browserChatStore.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing browser chat token' });
+    }
+    const body = req.body || {};
+    if (!body.id) return res.status(400).json({ error: 'id is required' });
+    openResults.set(body.id, {
+      id: body.id,
+      ok: !!body.ok,
+      window_id: Number.isInteger(body.window_id) ? body.window_id : null,
+      tab_ids: Array.isArray(body.tab_ids) ? body.tab_ids.filter((n) => Number.isInteger(n)) : [],
+      error: body.error || '',
+      reported_at: new Date().toISOString(),
+    });
+    res.json({ ok: true });
+  });
+
+  // Harness polls for an open command's outcome.
+  app.get('/api/browser-chats/open/result/:id', (req, res) => {
+    const result = openResults.get(req.params.id);
     if (!result) return res.json({ pending: true });
     res.json({ pending: false, result });
   });
@@ -3745,7 +4081,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     res.status(500).json({ error: err.message || 'Internal server error' });
   });
 
-  return { app, browserChatStore, remoteHookTunnelManager };
+  return { app, browserChatStore, remoteHookTunnelManager, cursorHookIngest };
 }
 
 async function main() {
@@ -3754,7 +4090,7 @@ async function main() {
   const port = await findPort(DEFAULT_PORT);
   await storage.writeConfig({ port, host: HOST, started_at: nowIso(), pid: process.pid });
 
-  const { app, browserChatStore, remoteHookTunnelManager } = buildApp(port);
+  const { app, browserChatStore, remoteHookTunnelManager, cursorHookIngest } = buildApp(port);
   restorePersistedRemoteHookTunnels(storage.getState(), remoteHookTunnelManager, port);
   const remoteHookOffsets = new Map();
   const remoteGeminiHookDebugOffsets = new Map();
@@ -3773,9 +4109,121 @@ async function main() {
   const localCursorAgentExecPermissionProbe = createAgentExecPermissionProbe({
     rendererProbe: localCursorRendererPermissionProbe,
   });
+  // Sub-agent permission gates have no renderer wakelock/hook — only the composer.composerHeaders
+  // hasBlockingPendingActions flag in state.vscdb, attributed to the parent via subagentInfo. Read at
+  // most every ~2.5s (heavily throttled; the flag flushes on a slow debounce so nothing is missed).
+  const localCursorComposerHeadersGateProbe = createComposerHeadersGateProbe({
+    minReadIntervalMs: 2500,
+  });
+  // cursor-CLI permission gates (parent + Task sub-agents) from the chat store.db — hook-independent
+  // and sub-agent-capable, unlike the config-eval-on-hooks tracker. Authoritative for LOCAL cursor-CLI
+  // watches (findStoreDbPath returns '' for IDE/ssh, so those are no-ops here). Emits the same
+  // permission_requested/_cleared events as the renderer probes → shared applyCursorRendererPermission-
+  // Events, matching the signal-replay grading exactly.
+  const localCursorCliStoreDbPermissionProbe = createCursorCliStoreDbPermissionProbe({
+    minReadIntervalMs: 1000,
+    findStoreDbPath: (conv) => localCursorCliStoreDbPath(conv),
+    resolveConfig: (watch) =>
+      resolveCursorCliConfig(
+        cursorCliHookBodyByConv.get((watch && (watch.conversation_id || watch.conversationId)) || '') || {
+          workspace_roots: [],
+          cwd: '',
+        }
+      ),
+    listSubagentIds: (watch, parentStoreDbPath) => {
+      const parentTranscript = watch && watch.transcript_path;
+      if (!parentTranscript) return [];
+      let paths = [];
+      try { paths = listSubagentTranscriptPathsForWatch(watch, parentTranscript) || []; } catch { paths = []; }
+      // agent-transcripts/<subagent_id>/<subagent_id>.jsonl → the dir name is the subagent id.
+      return paths.map((p) => path.basename(path.dirname(p))).filter(Boolean);
+    },
+  });
+  // `--source ssh` variant of the store.db permission probe: the agent (and its store.db, and each
+  // Task sub-agent's sibling store.db) runs on the REMOTE host, so the heads are read over ssh via
+  // createSshCursorCliHeadGateReader — a background-refreshed (~2.5s) cache on the SAME snapshot
+  // transport remotePendingAskQuestion uses, decoded locally with the SAME config-eval. Cold miss =
+  // no gate (never a false gate). Store.db tokens are `ssh\0host\0conversationOrSubagentId`; the
+  // host comes from the active ssh watches (rebuilt each poll below — the probe's findStoreDbPath
+  // only receives the conversation id). Sub-agent ids come from the continuation watcher's remote
+  // sibling discovery (the local probe lists them from the filesystem instead). Closes the ssh
+  // continuation of the store-db-permission-production-fork knownGap: ssh watches now feed the
+  // graded applyCursorRendererPermissionEvents path too, parent + sub-agent.
+  const cursorSshRunner = createSshRunner();
+  // Shared ssh runner for the gemini/agy remote poll blocks below. Without this binding the bare
+  // `runSsh` references in pollRemoteHookLogs resolved to NOTHING in main()'s scope (the only
+  // `runSsh` lives inside buildApp): every gemini remote block threw ReferenceError on its first
+  // tick and the per-block `catch {}` swallowed it — live ssh gemini polling (hook-debug tail,
+  // sub-agent cache, DB status, cancel/permission log reads) was silently dead.
+  const runSsh = cursorSshRunner;
+  // Hook-feed staleness surfacing for remote claude watches (tunnel-drop visibility): hook
+  // recency from the claude hook store, transcript corroboration via one throttled remote stat.
+  const claudeHookFeedStalenessProbe = createClaudeHookFeedStalenessProbe({
+    getHookActivityHintForTracking: (wt) => claudeHookStore.getHookActivityHintForTracking(wt),
+    statRemoteTranscriptMtimeMs: async (wt) => {
+      const p = String(wt.transcript_path || '').trim();
+      if (!p || !wt.host) return 0;
+      const q = `'${p.replace(/'/g, `'\\''`)}'`;
+      // BSD stat (macOS) first, GNU stat fallback — seconds since epoch either way.
+      const out = await runSsh(wt.host, `stat -f %m ${q} 2>/dev/null || stat -c %Y ${q} 2>/dev/null || echo 0`, 4000);
+      const sec = Number(String(out || '').trim().split(/\s+/)[0]) || 0;
+      return sec > 0 ? sec * 1000 : 0;
+    },
+  });
+  const sshCursorCliWatchHostByConv = new Map(); // conv -> host (active ssh cursor watches)
+  const sshCursorCliHeadGateReader = createSshCursorCliHeadGateReader({ runSsh: cursorSshRunner });
+  const sshCursorCliStoreDbPermissionProbe = createCursorCliStoreDbPermissionProbe({
+    watchSource: 'ssh',
+    minReadIntervalMs: 1000,
+    findStoreDbPath: (conv) => {
+      const c = String(conv || '').trim();
+      const host = c ? sshCursorCliWatchHostByConv.get(c) : '';
+      return host ? `ssh\0${host}\0${c}` : '';
+    },
+    subagentStoreDbPath: (subId, { parentStoreDbPath } = {}) => {
+      const parts = String(parentStoreDbPath || '').split('\0');
+      return parts.length === 3 && subId ? `ssh\0${parts[1]}\0${subId}` : '';
+    },
+    readHead: (token, config) => {
+      const parts = String(token || '').split('\0');
+      if (parts.length !== 3) return [];
+      return sshCursorCliHeadGateReader.read(parts[1], parts[2], config);
+    },
+    // No local file to stat for a remote head — the reader's TTL + minReadIntervalMs gate re-reads.
+    fingerprint: () => '',
+    resolveConfig: (watch) =>
+      resolveCursorCliConfig(
+        cursorCliHookBodyByConv.get((watch && (watch.conversation_id || watch.conversationId)) || '') || {
+          workspace_roots: [],
+          cwd: '',
+          // No hook body yet (e.g. server restarted mid-run): resolve the REMOTE config off the
+          // watch's host. A cold remote config is Run-Everything → no arming → no false gate.
+          source: 'ssh',
+          host: (watch && (watch.host || watch.remote_host)) || '',
+        }
+      ),
+    listSubagentIds: (watch) =>
+      cursorCliContinuationWatcher.knownSiblingSubagentIds(
+        (watch && (watch.conversation_id || watch.conversationId)) || ''
+      ),
+  });
+  // Store.db-probe OWNERSHIP for an ssh watch (mirrors the localCursorCliStoreDbPath(conv) check):
+  // while the remote head reader is warm the store.db probe owns the permission gate and the
+  // config-eval hook tracker's hint/resume guard is suppressed; if ssh transport dies the
+  // warm-ness decays (~30s) and the config-eval fallback takes over again.
+  const sshCursorStoreDbProbeOwns = (cursorTracking) => {
+    if (!cursorTracking || cursorTracking.source !== 'ssh') return false;
+    const conv = cursorTracking.conversation_id || cursorTracking.run_id || '';
+    const host = cursorTracking.host || cursorTracking.remote_host || '';
+    if (!conv || !host) return false;
+    return sshCursorCliHeadGateReader.isWarm(host, conv);
+  };
   try {
+    await sshCursorCliStoreDbPermissionProbe.init();
+    await localCursorCliStoreDbPermissionProbe.init();
     await localCursorRendererPermissionProbe.init();
     await localCursorAgentExecPermissionProbe.init();
+    await localCursorComposerHeadersGateProbe.init();
   } catch (err) {
     console.warn('[server] Cursor permission probe init failed:', err.message || String(err));
   }
@@ -3882,13 +4330,61 @@ async function main() {
         }
       }
       const execEvents = await localCursorAgentExecPermissionProbe.pollOnce();
-      const allEvents = [...rendererEvents, ...execGenEndedClears, ...execEvents];
+      // Sub-agent gates from state.vscdb — parent-attributed permission_requested/_cleared, same apply
+      // path as the renderer/exec permission events.
+      const composerHeadersEvents = await localCursorComposerHeadersGateProbe.pollOnce();
+      const allEvents = [...rendererEvents, ...execGenEndedClears, ...execEvents, ...composerHeadersEvents];
       const cursorRendererChanged =
         applyLocalCursorRendererPermissionEvents(allEvents) +
         applyLocalCursorRendererPendingPermissions();
       if (cursorRendererChanged > 0) await storage.save();
     } catch {
       // Keep polling despite transient local Cursor renderer log errors.
+    }
+    try {
+      // cursor-CLI permission gates (parent + Task sub-agents) from the chat store.db. Gather the
+      // active LOCAL cursor watches and let the probe emit permission_requested/_cleared through the
+      // shared renderer apply path. IDE/ssh watches are no-ops in the probe (no local chats/ store.db).
+      const cursorCliWatches = [];
+      for (const task of storage.getState().tasks || []) {
+        const wt = task.watch_tracking || task.cursor_tracking || task.paused_watch_tracking || null;
+        if (wt && wt.kind === 'cursor' && wt.source !== 'ssh' && (wt.conversation_id || wt.conversationId)) {
+          cursorCliWatches.push(wt);
+        }
+      }
+      if (cursorCliWatches.length) {
+        const storeDbEvents = await localCursorCliStoreDbPermissionProbe.pollOnce(cursorCliWatches);
+        if (storeDbEvents.length && applyLocalCursorRendererPermissionEvents(storeDbEvents) > 0) {
+          await storage.save();
+        }
+      }
+    } catch {
+      // Keep polling despite transient local Cursor store.db read errors.
+    }
+    try {
+      // ssh parity for the block above: cursor-CLI permission gates from the REMOTE store.db heads
+      // (parent + sibling sub-agents), read through the background-refreshed head-gate reader and
+      // emitted through the SAME applyCursorRendererPermissionEvents path. The host map feeds the
+      // probe's findStoreDbPath (which only receives the conversation id).
+      const sshCursorWatches = [];
+      sshCursorCliWatchHostByConv.clear();
+      for (const task of storage.getState().tasks || []) {
+        const wt = task.watch_tracking || task.cursor_tracking || task.paused_watch_tracking || null;
+        if (!wt || wt.kind !== 'cursor' || wt.source !== 'ssh') continue;
+        const conv = String(wt.conversation_id || wt.conversationId || '').trim();
+        const host = String(wt.host || wt.remote_host || '').trim();
+        if (!conv || !host) continue;
+        sshCursorCliWatchHostByConv.set(conv, host);
+        sshCursorWatches.push(wt);
+      }
+      if (sshCursorWatches.length) {
+        const sshStoreDbEvents = await sshCursorCliStoreDbPermissionProbe.pollOnce(sshCursorWatches);
+        if (sshStoreDbEvents.length && applyLocalCursorRendererPermissionEvents(sshStoreDbEvents) > 0) {
+          await storage.save();
+        }
+      }
+    } catch {
+      // Keep polling despite transient remote Cursor store.db read errors.
     }
     try {
       const out = await readLocalAgyCliCancelSignals(localAgyCliLogOffsets);
@@ -3984,6 +4480,7 @@ async function main() {
         try {
           const out = await readRemoteHookEvents(cfg, { offset: currentOffset, limit: 50 });
           remoteHookOffsets.set(key, out.offset || currentOffset);
+          let cursorPollChanged = 0;
           for (const event of out.events || []) {
             const body = {
               ...event,
@@ -3992,17 +4489,37 @@ async function main() {
               host: cfg.host,
               projects_root: cfg.projects_root,
             };
-            // Remote hooks are polled (not POSTed to /event), so tap them here too — the
-            // signal recorder reads the raw-tap and would otherwise miss remote done/cancel.
-            hookEventLog.push('cursor', body);
-            cursorHookStore.ingestEvent(body);
+            // Same ingestion as the POST route (raw tap, CLI permission tracker, continuation
+            // gate, hook store, resume/spawn/completion) — the poll path used to feed only the
+            // tap + hook store, so an ssh run with the tunnel down lost permission/re-arm/done
+            // application. Cross-path dedup inside ingest keeps an event that ALSO arrived via
+            // the reverse-tunnel POST from double-firing any consumer.
+            const applied = await cursorHookIngest.ingest(body, { via: 'poll' });
+            if (applied.deduped) continue;
+            cursorPollChanged +=
+              (applied.resumed || 0) + (applied.activated || 0) + (applied.completed || 0);
           }
+          if (cursorPollChanged > 0) await storage.save();
         } catch {
           // Keep polling despite transient ssh errors.
         }
         try {
           const geminiHookKey = `${cfg.host}::agy-hook-debug`;
-          const geminiHookOffset = remoteGeminiHookDebugOffsets.get(geminiHookKey) || 0;
+          let geminiHookOffset = remoteGeminiHookDebugOffsets.get(geminiHookKey);
+          if (geminiHookOffset == null) {
+            // First poll for this host (the offsets map is in-memory, so every server restart
+            // lands here): seed at the remote file's current EOF. Seeding 0 replays the whole
+            // multi-MB hook-debug HISTORY into the hook store as live events — days-old hooks
+            // then grade as live agent activity (observed breaking agy-cli ssh runs). An ssh
+            // failure here throws to the outer catch and reseeds next tick; never fall back to 0.
+            const sz = String(await runSsh(
+              cfg.host,
+              'wc -c < "$HOME/.gemini/antigravity-cli/scratch/hook-debug.log" 2>/dev/null || echo 0',
+              15000
+            )).trim();
+            geminiHookOffset = Number.parseInt(sz, 10) || 0;
+            remoteGeminiHookDebugOffsets.set(geminiHookKey, geminiHookOffset);
+          }
           const geminiHookOut = await readRemoteGeminiHookDebugEvents(cfg, {
             offset: geminiHookOffset,
             limit: 80,
@@ -4022,6 +4539,32 @@ async function main() {
           }
         } catch {
           // Keep polling despite transient remote agy hook-debug read errors.
+        }
+        try {
+          // Remote agy conversation-DB step-status channel (ssh parity for agyDbStatusTracker):
+          // refresh the per-host cache for the conversations the active ssh gemini watches (and
+          // their cascade sub-agents) care about — never a whole-remote-dir scan. Placed after
+          // the hook-debug block so refreshGeminiSubAgentCacheForHost has already warmed the
+          // sub-agent id cache this tick. The watch poller reads the cache synchronously via
+          // buildGeminiPollerDeps dbStatusForWatch; a cold/failed cache reads {present:false}.
+          const dbStatusConvIds = new Set();
+          for (const task of state.tasks || []) {
+            const wt = task.watch_tracking || task.paused_watch_tracking || null;
+            if (!wt || (wt.provider !== 'gemini' && wt.provider !== 'gemini_cli') || wt.source !== 'ssh') continue;
+            const wtHost = String(wt.host || wt.remote_host || '').trim();
+            if (!wtHost || wtHost !== cfg.host) continue;
+            const sid = String(wt.session_id || '').trim();
+            if (sid) dbStatusConvIds.add(sid);
+            for (const childId of geminiCollectSubAgentIds(wt)) {
+              const cid = String(childId || '').trim();
+              if (cid) dbStatusConvIds.add(cid);
+            }
+          }
+          if (dbStatusConvIds.size) {
+            await agyRemoteDbStatusTracker.refreshHost(cfg.host, [...dbStatusConvIds], { runSsh });
+          }
+        } catch {
+          // Keep polling despite transient remote agy DB step-status read errors.
         }
         try {
           const cancelKey = cfg.host;
@@ -4107,18 +4650,39 @@ async function main() {
     applyTaskStatusChange,
     findBrowserChatSnapshot: (provider, conversation_id) =>
       browserChatStore.findSnapshot(provider, conversation_id),
+    isBrowserChatDeepResearchInFlight: (provider, conversation_id) =>
+      browserChatStore.isDeepResearchInFlight(provider, conversation_id),
     getCursorCompletionHint: (cursorTracking) => cursorHookStore.getCompletionHintForTracking(cursorTracking),
     getCursorConversationSnapshot: (cursorTracking) =>
       cursorHookStore.getConversationSnapshotForTracking(cursorTracking),
+    // cursor-cli continuation gate (lib/cursor_cli_continuation.js): baseline/arming poll every
+    // tick, hold decision when a completed stop hint is pending.
+    pollCursorCliContinuation: (cursorTracking) => cursorCliContinuationWatcher.poll(cursorTracking),
+    getCursorCliContinuationHold: (cursorTracking, hint) =>
+      cursorCliContinuationWatcher.evaluateHold(cursorTracking, hint),
     isCursorRendererPermissionPending: (cursorTracking) =>
       localCursorRendererPermissionProbe.isPermissionPendingForWatch(cursorTracking) ||
-      localCursorAgentExecPermissionProbe.isPermissionPendingForWatch(cursorTracking),
+      localCursorAgentExecPermissionProbe.isPermissionPendingForWatch(cursorTracking) ||
+      // cursor-CLI store.db gate (parent + sub-agent) — the authoritative CLI resume guard: hold
+      // the pause while the store.db head (local file or remote head over ssh) is still parked at
+      // the gate.
+      localCursorCliStoreDbPermissionProbe.isPermissionPendingForWatch(cursorTracking) ||
+      sshCursorCliStoreDbPermissionProbe.isPermissionPendingForWatch(cursorTracking),
     // cursor-CLI config-eval permission gate (lib/cursor_cli_permission.js). Returns the
     // visible (debounced) pending snapshot for a tracked conversation, or null. Only CLI runs
     // ever arm it, so IDE watches get null here and keep using the renderer/agent-exec probes.
+    // LOCAL cursor-CLI conversations are OWNED by the store.db probe (hook-independent + sub-agent-
+    // capable), so we return null for them here — the store.db event path opens the gate instead, and
+    // this hook-tracker (which the flaky per-tool hooks can leave stuck-pending) must not compete.
+    // ssh CLI runs are owned by the REMOTE store.db probe while its head reader is warm
+    // (sshCursorStoreDbProbeOwns); the config-eval hint remains the cold/degraded fallback when
+    // the remote store.db cannot be read.
     getCursorPermissionPendingHint: (cursorTracking) => {
       const conv = cursorTracking?.conversation_id || cursorTracking?.run_id || '';
-      const snap = conv ? cursorCliPermissionTracker.getVisiblePending(conv) : null;
+      if (!conv) return null;
+      if (localCursorCliStoreDbPath(conv)) return null; // store.db probe is authoritative for local CLI
+      if (sshCursorStoreDbProbeOwns(cursorTracking)) return null; // remote store.db probe owns warm ssh CLI
+      const snap = cursorCliPermissionTracker.getVisiblePending(conv);
       if (!snap) return null;
       return {
         conversation_id: snap.conversation_id,
@@ -4129,10 +4693,17 @@ async function main() {
       };
     },
     // Resume predicate for a watch paused on a cursor-CLI permission gate: true while still
-    // pending (don't resume), false once the matching after-hook/next-tool/stop resolved it.
+    // pending (don't resume), false once the matching after-hook/next-tool/stop resolved it. For
+    // LOCAL CLI the store.db probe (isCursorRendererPermissionPending above) is the resume guard, so
+    // this returns false there — otherwise a hook-tracker left stuck-pending (postToolUse never fired)
+    // would block the store.db resume forever. Warm ssh CLI is likewise owned by the remote
+    // store.db probe's resume guard; cold ssh keeps the config-eval resume guard.
     isCursorCliPermissionPending: (cursorTracking) => {
       const conv = cursorTracking?.conversation_id || cursorTracking?.run_id || '';
-      return conv ? cursorCliPermissionTracker.isPending(conv) : false;
+      if (!conv) return false;
+      if (localCursorCliStoreDbPath(conv)) return false; // store.db probe owns the local-CLI resume guard
+      if (sshCursorStoreDbProbeOwns(cursorTracking)) return false; // remote store.db probe owns warm ssh CLI
+      return cursorCliPermissionTracker.isPending(conv);
     },
     // cursor question gate via the chat store.db (lib/cursor_chat_db.js). Returns true while the
     // conversation head is a pending AskQuestion asked AFTER linked_at — the sole question-open
@@ -4185,6 +4756,40 @@ async function main() {
             : undefined,
       }),
     getCodexCompletionHint: (ideTracking) => codexHookStore.getCompletionHintForTracking(ideTracking),
+    // Heartbeat hold for the codex done-clear: a pending self-scheduled near-future wakeup means
+    // the Stop was a yield, not a finish (codex-desktop background-wakeup false-clear).
+    isCodexHeartbeatDoneHoldActive: (ideTracking) => codexHookStore.hasPendingHeartbeat(ideTracking),
+    // While the wake turn runs, a stale transcript snapshot must not clear via the fallback.
+    isCodexHeartbeatWakeActive: (ideTracking) => codexHookStore.isHeartbeatWakeActive(ideTracking),
+    // Sub-agent hold inputs for the codex done-clear (lib/watch_tracker codexSubagentDoneHoldActive):
+    // hooks report which sub-agents are active; the parent rollout transcript reports which have
+    // completed (<subagent_notification>).
+    getCodexSubagentActivity: (ideTracking) => codexHookStore.getSubagentActivity(ideTracking),
+    // Notified-ids channel: LOCAL only, on purpose. Over ssh the parent transcript is only
+    // remote-read inside remoteCodexWatchShouldClearSince (the raw text is not shared out of that
+    // call), so wiring codexSubagentStateSince here would cost a SECOND full-file ssh cat per held
+    // tick. ssh watches release a held done via the worker's SubagentStop hook (reverse tunnel),
+    // the remote worker-rollout facts below, or the 30s quiet backstop.
+    getCodexSubagentNotifiedIds: async (ideTracking) => {
+      if (!ideTracking.transcript_path || ideTracking.source === 'ssh') return null;
+      const state = await codexSubagentStateSince(ideTracking.transcript_path);
+      return state.notified;
+    },
+    // Worker-rollout liveness: a hookless spawn_agent worker (desktop) is only observable via its
+    // own rollout file (found by agent id). Local watches read the local sessions root; ssh watches
+    // read the REMOTE rollout through the background-refreshed codexRemoteRolloutCache — never
+    // blocking the 2s tick (cold cache returns null → the 30s quiet backstop, exactly the pre-fix
+    // ssh behavior; the first refresh lands within a tick or two and gives a precise hold/release).
+    getCodexSubagentRolloutStatus: async (ideTracking, agentId) => {
+      if (ideTracking?.source === 'ssh') {
+        const host = ideTracking.host || ideTracking.remote_host || '';
+        const projectsRoot =
+          typeof ideTracking.projects_root === 'string' ? ideTracking.projects_root.trim() : '';
+        if (!host || !projectsRoot) return null;
+        return codexRemoteRolloutCache.get({ host, projects_root: projectsRoot }, agentId);
+      }
+      return codexAgentRolloutFacts(agentId);
+    },
     // Gemini deps come from one shared builder (lib/gemini_poller_deps.js) so the live
     // server and signal replay can't drift. The transcript predicates below are the
     // server's live file/ssh reads; replay injects its in-memory equivalents.
@@ -4193,6 +4798,14 @@ async function main() {
       hooksEnabled: true,
       transcriptEnabled: true,
       primaryDoneOnly: AGY_PRIMARY_DONE_ONLY,
+      dbStatus: agyDbStatusTracker,
+      // Per-watch DB-channel routing: ssh watches read the per-host REMOTE cache (refreshed by
+      // pollRemoteHookLogs), local watches keep the local cached-sqlite tracker. Deps are built
+      // once, so the split lives here rather than in a construction-time dbStatus switch.
+      dbStatusForWatch: (wt) =>
+        wt?.source === 'ssh'
+          ? agyRemoteDbStatusTracker.forHost(wt.host || wt.remote_host)
+          : agyDbStatusTracker,
       subAgentIds: geminiCollectSubAgentIds,
       transcriptCancelLocal: (ideTracking) =>
         ideTracking.transcript_path
@@ -4289,9 +4902,13 @@ async function main() {
     shouldCompleteClaudeWatch: (ideTracking) => shouldCompleteClaudeWatchFromTranscript(ideTracking),
     shouldClaudePausedWatchCancel: (ideTracking, pausedAtIso) =>
       claudePausedWatchShouldCancel(ideTracking, pausedAtIso),
-    shouldCompleteRemoteClaudeWatch: (ideTracking) => {
+    shouldCompleteRemoteClaudeWatch: async (ideTracking) => {
       const projectsRoot = typeof ideTracking.projects_root === 'string' ? ideTracking.projects_root.trim() : '';
       if (!ideTracking.host || !projectsRoot) return false;
+      // Surface-only: stamp hook_feed_stale when hooks are silent while the remote transcript
+      // advances (claude's tunnel-drop blind spot — hooks have no on-disk remote fallback).
+      // Never affects the completion decision below.
+      await claudeHookFeedStalenessProbe.evaluateAndStamp(ideTracking);
       return remoteClaudeWatchCompletionSince(
         {
           host: ideTracking.host,
@@ -4305,10 +4922,14 @@ async function main() {
       coworkTurnCompletedSince(ideTracking.audit_path || ideTracking.transcript_path, ideTracking.linked_at),
   });
   poller.start();
+  // Non-overlapping: a slow pass (ssh contention, big remote logs) must SLOW polling, not stack a
+  // new pass every second — unguarded stacking is what herded the ssh ControlMaster past the
+  // remote's MaxSessions in the 2026-07 ssh round (26–64 sustained connections, no self-drain).
+  const guardedPollRemoteHookLogs = wrapNonOverlapping(pollRemoteHookLogs);
   setInterval(() => {
-    pollRemoteHookLogs().catch(() => {});
+    guardedPollRemoteHookLogs().catch(() => {});
   }, 1000).unref();
-  pollRemoteHookLogs().catch(() => {});
+  guardedPollRemoteHookLogs().catch(() => {});
 
   if (serverExposesNonLocalBind()) {
     console.warn(

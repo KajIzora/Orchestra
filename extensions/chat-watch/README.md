@@ -42,7 +42,7 @@ Snapshots are posted to your **local** Orchestra instance (`POST /api/browser-ch
 
 **Prompt previews are opt-in.** By default, `last_user_preview` is **not** sent. If you enable **Send prompt previews** in the extension popup, Orchestra may receive up to **240 characters** from the latest user message (or draft input on Gemini) to help identify which chat is linked.
 
-Tab close and completion events use the same local API (`tab-closed`, `complete`). Nothing is sent to third-party servers by this extension.
+Tab close, completion, and explicit cancel events use the same local API (`tab-closed`, `complete`, `cancel`). Nothing is sent to third-party servers by this extension.
 
 ### Logging
 
@@ -53,7 +53,8 @@ By default the extension is **quiet** in the page console. Enable **Debug loggin
 - Injects a content script on `chatgpt.com`, `chat.openai.com`, `claude.ai`, and `gemini.google.com`.
 - Detects **generating** vs idle (Stop controls on ChatGPT; on Claude deep research, open conversation + no Stop response + visible “Research complete”; on Gemini deep research, `used-sources-button`, `message-content`, and `export-menu-button` together mean done).
 - POSTs tab snapshots to `POST /api/browser-chats/snapshot` with header `X-Browser-Chat-Token` (token comes from `GET /api/browser-chats/config` when the server is up).
-- When a tab goes from generating → idle, POSTs `POST /api/browser-chats/complete` so any task watching that `provider` + `conversation_id` leaves **waiting** (watcher cleared, same as other watchers).
+- When a tab goes from generating → idle, POSTs `POST /api/browser-chats/complete` so any task watching that `provider` + `conversation_id` clears to done.
+- When ChatGPT, Claude, or Gemini fires its explicit cancel signal, POSTs `POST /api/browser-chats/cancel` so the task clears back to the blank monitor pill.
 - On tab close, notifies `POST /api/browser-chats/tab-closed` so stale tab entries are removed.
 
 ## Inspector popup

@@ -115,8 +115,9 @@
   window.addEventListener('chat-watch-console-log', consoleLogListener);
 
   // Forward MAIN-world stream-body signals (S1/S3/S4/S5) to the background worker. Structural
-  // fields only — provider, conversation_id, turn_id, marker, endpoint, method, t. Same dispatch
-  // pattern as the console-log path above.
+  // fields only — provider, conversation_id, turn_id, marker, endpoint, method, t, plus the
+  // handoff flag and body duration (both structural; see spoofer.js emitStreamSignals). Same
+  // dispatch pattern as the console-log path above.
   const streamSignalListener = (event) => {
     try {
       const d = (event && event.detail) || {};
@@ -131,6 +132,8 @@
             endpoint: d.endpoint || '',
             method: d.method || '',
             t: typeof d.t === 'number' ? d.t : Date.now(),
+            handoff: d.handoff === true,
+            body_ms: typeof d.body_ms === 'number' && d.body_ms >= 0 ? d.body_ms : 0,
           },
         },
         () => {
@@ -144,6 +147,62 @@
 
   window.addEventListener('chat-watch-stream-signal', streamSignalListener);
 
+  // Relay for the deep-research frame observer (v0.5.15). content-dr-frame.js runs inside the
+  // SANDBOXED research-card iframe, whose opaque origin cannot reliably use runtime APIs
+  // (live-confirmed) — so it posts its button state to this parent page, and we forward it to the
+  // background worker. Validation is by SOURCE, not origin (a sandboxed frame's origin is "null"):
+  // the message must come from the contentWindow of an iframe in THIS document whose src points at
+  // the *.oaiusercontent.com sandbox. Payload is structural booleans/counters only.
+  let drFrameSeen = false;
+  const drFrameRelayListener = (event) => {
+    const data = event && event.data;
+    const payload = data && typeof data === 'object' ? data.__orchestraChatWatchDrFrame : null;
+    if (!payload || typeof payload !== 'object') return;
+    // The research UI is NESTED (page → connector shell iframe → inner frame), so the sender may
+    // be any depth below one of our sandbox iframes. Walk the source's parent chain (parent/top
+    // are whitelisted cross-origin accessors; identity comparison against contentWindow is safe)
+    // and accept only if it passes through an iframe in THIS document whose src points at the
+    // *.oaiusercontent.com sandbox.
+    let fromSandboxFrame = false;
+    try {
+      const sandboxWindows = [];
+      for (const frame of document.querySelectorAll('iframe')) {
+        const host = new URL(frame.getAttribute('src') || '', location.href).hostname;
+        if (/\.oaiusercontent\.com$/i.test(host) && frame.contentWindow) sandboxWindows.push(frame.contentWindow);
+      }
+      let w = event.source;
+      for (let depth = 0; w && depth < 5; depth += 1) {
+        if (sandboxWindows.includes(w)) { fromSandboxFrame = true; break; }
+        if (w === window.top || w === w.parent) break;
+        w = w.parent;
+      }
+    } catch (_) { fromSandboxFrame = false; }
+    if (!fromSandboxFrame) return;
+    drFrameSeen = true;
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: 'DR_FRAME_STATE',
+          payload: {
+            event: typeof payload.event === 'string' ? payload.event : '',
+            stop_visible: payload.stop_visible === true,
+            start_visible: payload.start_visible === true,
+            completed_visible: payload.completed_visible === true,
+            pagehide: payload.pagehide === true,
+            buttons: typeof payload.buttons === 'number' ? payload.buttons : 0,
+            t: typeof payload.t === 'number' ? payload.t : Date.now(),
+          },
+        },
+        () => {
+          try { void chrome.runtime.lastError; } catch (_) {}
+        }
+      );
+    } catch (err) {
+      handleInvalidatedExtensionContext(err);
+    }
+  };
+  window.addEventListener('message', drFrameRelayListener);
+
   function cleanup() {
     disposed = true;
     window.clearTimeout(changeTimer);
@@ -151,6 +210,7 @@
     if (observer) observer.disconnect();
     window.removeEventListener('chat-watch-console-log', consoleLogListener);
     window.removeEventListener('chat-watch-stream-signal', streamSignalListener);
+    window.removeEventListener('message', drFrameRelayListener);
   }
 
   window.__taskAppChatWatchCleanup = cleanup;
@@ -444,12 +504,55 @@
     });
   }
 
+  // The deep-research progress card renders in a cross-origin sandboxed iframe
+  // (connector_openai_deep_research.web-sandbox.oaiusercontent.com, title "internal://deep-research").
+  // Same-origin policy hides its CONTENTS (the "Stop research" button lives in there, unreachable
+  // from this document), but the <iframe> ELEMENT is part of this page — its visible presence is
+  // the one parent-DOM landmark that the research is on screen. The in-frame observer
+  // (content-dr-frame.js) reads the button itself; this is the parent-side half.
+  function findChatGptResearchCardIframe() {
+    for (const frame of document.querySelectorAll('iframe')) {
+      let host = '';
+      try { host = new URL(frame.getAttribute('src') || '', location.href).hostname; } catch (_) { host = ''; }
+      const title = textOf(frame.getAttribute('title'));
+      const isResearchCard =
+        title === 'internal://deep-research' ||
+        (/\.web-sandbox\.oaiusercontent\.com$/i.test(host) && /deep[_-]?research/i.test(host));
+      if (isResearchCard && isVisible(frame)) return frame;
+    }
+    return null;
+  }
+
+  // v0.5.12: the legacy chip heuristic (chip + assistant shell + no response actions) must hold
+  // CONTINUOUSLY for this long before it reads as research-in-progress. A completed-research page
+  // load passes through that exact shape for a sub-second window while the response actions
+  // render (observed live: one transient arm + one generating:true snapshot per page load — the
+  // immediate-resume flap vector). A real research start holds the shape from prompt-send until
+  // the intro's actions appear (~5-15s), so a 1.5s debounce costs the arm almost nothing.
+  const DR_HEURISTIC_DEBOUNCE_MS = 1500;
+  let drHeuristicSinceMs = 0;
+  let drHeuristicCid = null;
+
+  // v0.5.11: the card iframe element is DIAGNOSTIC ONLY (dr_card_visible), never a state input.
+  // Live evidence killed every attempt to use it for state: (a) the card PERSISTS on a completed
+  // research page, so visibility ≠ working; (b) a "live-mount" gate (card appearing where it was
+  // absent) is defeated by staged page rendering — turns render a beat before the iframe mounts,
+  // on loads, reloads, AND rapid SPA navigation, so completed pages kept false-arming (observed
+  // three transient arms while flipping through finished researches); (c) the report renders into
+  // the SAME conversation turn as the intro, so no turn arithmetic can release a card-based hold.
+  // The in-frame observer (content-dr-frame.js — sees the actual Stop-research button) is the
+  // deep-research truth; the legacy chip heuristic below covers the opening seconds before the
+  // frame port connects.
+
   function collectChatGptDeepResearchSignals(provider, buttons, landmarks, conversationId) {
     if (provider.id !== 'chatgpt') {
       return {
         hasDeepResearchChip: false,
         hasAssistantShell: false,
         hasCompletedResponseActions: false,
+        hasResearchCard: false,
+        latestTurnNumber: -1,
+        completedTurnNumber: -1,
         deepResearchInProgress: false,
       };
     }
@@ -516,14 +619,46 @@
       }
     }
 
+    // Turn anchors (structural ints, never content). DIAGNOSTIC as of v0.5.11: the report renders
+    // into the SAME conversation turn as the intro (turn numbers never advance), so these can no
+    // longer gate the completion — they are kept for recordings/replay analysis only.
+    const observedLatestTurn = latestTurnNumber >= 0 ? latestTurnNumber : landmarkLatestTurnNumber;
+    const completedTurnNumber = hasCompletedResponseActions
+      ? (latestAssistantIsCurrent && latestAssistantShell ? latestAssistantShell.turnNumber : observedLatestTurn)
+      : -1;
+
+    // Raw card-iframe visibility — diagnostics only (dr_card_visible), never a state input.
+    const hasResearchCard = Boolean(findChatGptResearchCardIframe());
+
     return {
       hasDeepResearchChip,
       hasAssistantShell: hasCurrentAssistantShell,
       hasCompletedResponseActions,
-      deepResearchInProgress: Boolean(
-        conversationId && hasDeepResearchChip && hasCurrentAssistantShell && !hasCompletedResponseActions
+      hasResearchCard,
+      latestTurnNumber: observedLatestTurn,
+      completedTurnNumber,
+      // Legacy chip heuristic only: true during the research's OPENING seconds (chip + assistant
+      // shell present, response actions not yet grown). Goes false once the intro's actions appear
+      // — from there the in-frame observer (Stop-research button, via background) is the truth.
+      // Time-debounced (v0.5.12) so a completed page's staged render can't transiently match.
+      deepResearchInProgress: debouncedDrHeuristic(
+        Boolean(conversationId && hasDeepResearchChip && hasCurrentAssistantShell && !hasCompletedResponseActions),
+        conversationId
       ),
     };
+  }
+
+  // See DR_HEURISTIC_DEBOUNCE_MS. Raw heuristic edges (false, or a conversation change) reset the
+  // clock; the debounced value is true only once the shape has held for the full window.
+  function debouncedDrHeuristic(rawActive, conversationId) {
+    const now = Date.now();
+    if (!rawActive || drHeuristicCid !== conversationId) {
+      drHeuristicSinceMs = rawActive ? now : 0;
+      drHeuristicCid = conversationId;
+      return false;
+    }
+    if (!drHeuristicSinceMs) drHeuristicSinceMs = now;
+    return now - drHeuristicSinceMs >= DR_HEURISTIC_DEBOUNCE_MS;
   }
 
   function collectMessageStats() {
@@ -620,6 +755,19 @@
               completion_signal: !!snapshot.completionSignal,
               failure_signal: !!snapshot.failureSignal,
               failure_reason: snapshot.failureReason || '',
+              // Turn anchors for the chatgpt DR completion gate (see collectChatGptDeepResearchSignals).
+              latest_turn: snapshot.chatGptDeepResearch && snapshot.chatGptDeepResearch.latestTurnNumber >= 0
+                ? snapshot.chatGptDeepResearch.latestTurnNumber : null,
+              completion_turn: snapshot.chatGptDeepResearch && snapshot.chatGptDeepResearch.completedTurnNumber >= 0
+                ? snapshot.chatGptDeepResearch.completedTurnNumber : null,
+              // Parent-DOM research-card observation (cross-origin iframe element visibility,
+              // live-mount + turn gated) — the server arms its deep-research in-flight hold on it.
+              deep_research_active: !!(snapshot.chatGptDeepResearch && snapshot.chatGptDeepResearch.deepResearchInProgress),
+              // Raw card visibility (ungated) — observability: does the iframe persist on a
+              // finished research page? Never used to arm or clear anything.
+              dr_card_visible: !!(snapshot.chatGptDeepResearch && snapshot.chatGptDeepResearch.hasResearchCard),
+              // Whether the in-frame observer has been heard from on this page (v0.5.15 diagnostic).
+              dr_frame_seen: drFrameSeen,
               activity_summary: (snapshot.activityIndicators || [])
                 .map((item) => labelOf(item))
                 .filter(Boolean)
@@ -684,7 +832,11 @@
       chatGptDeepResearch.deepResearchInProgress ||
       geminiDeepResearch.deepResearchInProgress ||
       claudeDeepResearch.deepResearchInProgress;
-    const generating = failureState.failureSignal ? false : reportComplete ? false : baseGenerating || researchInProgress;
+    // researchInProgress outranks reportComplete: during a chatgpt deep research the INTRO turn's
+    // response actions raise reportComplete while the research card is still up — the turn-gated
+    // cardInProgress already told the two apart, so trust it for `generating`. completionSignal
+    // still reports the (false) landmark; the server's completion gate holds it (lib/browser_chat).
+    const generating = failureState.failureSignal ? false : researchInProgress ? true : reportComplete ? false : baseGenerating;
     const completionSignal = !!(failureState.failureSignal || reportComplete);
 
     return {
@@ -725,6 +877,8 @@
       provider: snapshot.provider,
       generating: snapshot.generating,
       completionSignal: snapshot.completionSignal,
+      chatGptResearchCard: snapshot.chatGptDeepResearch?.hasResearchCard,
+      chatGptResearchInProgress: snapshot.chatGptDeepResearch?.deepResearchInProgress,
       geminiDeepResearchComplete: snapshot.geminiDeepResearch?.deepResearchReportComplete,
       claudeDeepResearchComplete: snapshot.claudeDeepResearch?.deepResearchReportComplete,
       failureSignal: snapshot.failureSignal,
