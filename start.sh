@@ -5,7 +5,7 @@ cd "$ROOT"
 
 # Browser + menu-bar mode: starts Node backend (and optional menubar.py).
 # For a native window instead, use: npm run desktop:dev (see README).
-# Dev defaults (HOST=0.0.0.0, PORT=47823, ~/.orchestra/dev): profiles/dev.env
+# Dev defaults (HOST=127.0.0.1, PORT=47823, ~/.orchestra/dev): profiles/dev.env
 if [[ -z "${ORCHESTRA_SKIP_DEV_PROFILE:-}" ]]; then
   _saved_data="${ORCHESTRA_DATA_DIR-}"
   _saved_host="${HOST-}"

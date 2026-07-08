@@ -158,6 +158,7 @@ const {
   enrichClaudeHookPickerRuns,
   claudeWatchActiveGenerationSince,
   remoteClaudeWatchActiveGenerationSince,
+  findClaudeHookSnapshotForRun,
 } = require('./lib/claude_tracker');
 const { createClaudeHookFeedStalenessProbe } = require('./lib/claude_hook_feed_staleness');
 const {
@@ -707,6 +708,19 @@ function annotateGeminiPermissionState(runs, snapshots) {
   });
 }
 
+// Stamp `held` on codex picker rows whose watch is still holding: an open sub-agent
+// (spawn_agent worker still working) or a pending self-scheduled heartbeat/wakeup. The hold lives
+// in the store's subagent/heartbeat maps (consulted only by the completion sweep), so the Stop
+// snapshot reads generating:false/completion_hint:true and the row would otherwise vanish.
+function annotateCodexHeldState(runs) {
+  if (!Array.isArray(runs) || !runs.length) return runs || [];
+  return runs.map((run) => {
+    if (!run || run.held === true) return run;
+    const held = codexHookStore.hasOpenSubagentWork(run) || codexHookStore.hasPendingHeartbeat(run);
+    return held ? { ...run, held: true } : run;
+  });
+}
+
 async function listCodexRunsFromHookStore(project, source) {
   const rolledUp = rollUpSnapshotsForPicker('codex', codexHookStore.listSnapshots());
   const localWorkspaces = (project.cursor_workspaces || [])
@@ -732,7 +746,7 @@ async function listCodexRunsFromHookStore(project, source) {
     }
     runs.sort((a, b) => (b.mtime_ms || 0) - (a.mtime_ms || 0));
     const enriched = await Promise.all(runs.map((run) => enrichCodexPickerRunWithTranscript(run)));
-    return { runs: enriched, error: null };
+    return { runs: annotateCodexHeldState(enriched), error: null };
   }
 
   const remotes =
@@ -781,7 +795,39 @@ async function listCodexRunsFromHookStore(project, source) {
       })
     )
   );
-  return { runs: enriched, error: null };
+  return { runs: annotateCodexHeldState(enriched), error: null };
+}
+
+// Stamp `held` on agy/gemini picker rows whose watch is held on a non-quiescent sub-agent cascade:
+// the parent emitted its NO_TOOL_CALL partial Stop and went quiet, but a sub-agent is still working
+// (in-flight tool, working-grace) or paused on a gate / scheduled wakeup. The child hooks land on
+// the child's own (excluded) snapshot, so the parent snapshot reads generating:false and the row
+// would vanish. Mirrors the watch's cascadeHasRecentActivity gate. Covers agy-cli and agy-app
+// (app snapshots reconstruct the brain transcript like geminiSubAgentSessionIdSet). DB-status-only
+// holds with no sub-agent are a known residual (not covered here — no cascade to gate on).
+function geminiPickerRunIsHeld(run, snapshots) {
+  if (!run || typeof run !== 'object') return false;
+  const snap = (Array.isArray(snapshots) ? snapshots : []).find((s) => geminiRunMatchesSnapshot(run, s));
+  if (!snap) return false;
+  const isRemote = !!snap.remote_host;
+  const transcriptPath = isRemote ? snap.transcript_path : localAgySnapshotTranscriptPath(snap);
+  const tracking = {
+    provider: 'gemini',
+    session_id: snap.session_id || run.session_id || '',
+    transcript_path: transcriptPath || run.transcript_path || '',
+    source: isRemote ? 'ssh' : 'local',
+    host: snap.remote_host || null,
+  };
+  const subAgentIds = geminiCollectSubAgentIds(tracking);
+  if (!subAgentIds.length) return false;
+  return geminiHookStore.cascadeHasRecentActivity(tracking, { subAgentIds });
+}
+
+function annotateGeminiHeldState(runs, snapshots) {
+  if (!Array.isArray(runs) || !runs.length) return runs || [];
+  return runs.map((run) =>
+    run && run.held !== true && geminiPickerRunIsHeld(run, snapshots) ? { ...run, held: true } : run
+  );
 }
 
 async function listGeminiRunsFromHookStore(project, source, options = {}) {
@@ -799,7 +845,10 @@ async function listGeminiRunsFromHookStore(project, source, options = {}) {
       excludeSessionIds,
     });
     const annotated = annotateGeminiPermissionState(snapshotRuns, rolledUpSnapshots);
-    const runs = await enrichGeminiHookPickerRuns(annotated, rolledUpSnapshots);
+    const runs = annotateGeminiHeldState(
+      await enrichGeminiHookPickerRuns(annotated, rolledUpSnapshots),
+      rolledUpSnapshots
+    );
     return { runs, error: null };
   }
 
@@ -835,14 +884,31 @@ async function listGeminiRunsFromHookStore(project, source, options = {}) {
     excludeSessionIds,
   });
   const annotated = annotateGeminiPermissionState(snapshotRuns, rolledUpSnapshots);
-  const runs = await enrichGeminiHookPickerRuns(annotated, rolledUpSnapshots, {
-    // Keep hook-driven discovery for speed, but allow transcript enrichment
-    // so remote agy rows inherit completion/cancel state and real user preview.
-    hookOnlyRemote: false,
-  });
+  const runs = annotateGeminiHeldState(
+    await enrichGeminiHookPickerRuns(annotated, rolledUpSnapshots, {
+      // Keep hook-driven discovery for speed, but allow transcript enrichment
+      // so remote agy rows inherit completion/cancel state and real user preview.
+      hookOnlyRemote: false,
+    }),
+    rolledUpSnapshots
+  );
 
   runs.sort((a, b) => (b.mtime_ms || 0) - (a.mtime_ms || 0));
   return { runs, error: null };
+}
+
+// Stamp `held` on each claude picker row: a run whose watch is still holding (running sub-agent,
+// bounded busy-hold shell task, cron debounce, one-shot wakeup) reads generating:false/
+// completion_hint:true on its snapshot but must NOT vanish from the picker. Mirrors the watch's
+// exact done-gate via claudeHookStore.snapshotHeld. Keep it visible past the generating/
+// completion_hint filter levers (see the held-aware filters in server.js + public/app.js).
+function annotateClaudeHeldState(runs, snapshots) {
+  if (!Array.isArray(runs) || !runs.length) return runs || [];
+  const snaps = Array.isArray(snapshots) ? snapshots : [];
+  return runs.map((run) => {
+    const snap = findClaudeHookSnapshotForRun(run, snaps);
+    return snap && claudeHookStore.snapshotHeld(snap) ? { ...run, held: true } : run;
+  });
 }
 
 async function listClaudeRunsFromHookStore(project, source) {
@@ -854,7 +920,7 @@ async function listClaudeRunsFromHookStore(project, source) {
       .filter(Boolean);
     const runs = pickerRunsFromClaudeSnapshots(snapshots, { source: 'local', localWorkspaces });
     return {
-      runs: await enrichClaudeHookPickerRuns(runs, snapshots),
+      runs: annotateClaudeHeldState(await enrichClaudeHookPickerRuns(runs, snapshots), snapshots),
       error: null,
     };
   }
@@ -898,7 +964,7 @@ async function listClaudeRunsFromHookStore(project, source) {
     runs = mergeClaudeDiscoveryPickerRuns(runs, discovered, remote);
   }
   return {
-    runs: await enrichClaudeHookPickerRuns(runs, snapshots),
+    runs: annotateClaudeHeldState(await enrichClaudeHookPickerRuns(runs, snapshots), snapshots),
     error: null,
   };
 }
@@ -2187,7 +2253,10 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
         if (provider === 'claude_cowork') runs = await discoverClaudeCoworkRuns();
       }
       if (activeOnly) {
-        runs = (runs || []).filter((run) => run && run.generating === true);
+        // A held run (parked on a sub-agent / background task / cron / cascade whose watch is
+        // still holding) is still "active" for picker purposes even though its snapshot reads
+        // generating:false — keep it so it does not vanish from the picker mid-hold.
+        runs = (runs || []).filter((run) => run && (run.generating === true || run.held === true));
       }
       res.json({ runs });
     } catch (err) {

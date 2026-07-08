@@ -1742,8 +1742,15 @@
     const filtered = (runs || []).filter((run) => {
       if (run.provider !== provider) return false;
       if (!((!!run.host === isRemote) || (!run.host && !isRemote))) return false;
-      if (run.generating !== true) return false;
-      if (run.completion_hint) return false;
+      // A HELD run has parked (waiting on a sub-agent, background task, cron/wakeup, or cascade)
+      // but its underlying watch is still holding — the agent has NOT finished. Keep it in the
+      // picker regardless of the generating/completion_hint levers, exactly like a permission
+      // pause below. Without this, a held run's snapshot reads generating:false/completion_hint:true
+      // the instant it parks and it would vanish until it resumes (see picker-held-run bug).
+      if (run.held !== true) {
+        if (run.generating !== true) return false;
+        if (run.completion_hint) return false;
+      }
       // Note: a pending permission (gemini notification_type === 'ToolPermission') is NOT
       // filtered out here. A chat paused on a permission prompt is still a live run, so it
       // stays in the picker — grayed if a task is watching it (see findWatchingTask /
@@ -1804,8 +1811,13 @@
     const { runs } = await api('GET', `/api/projects/${project.id}/cursor-runs?active_only=1`);
     const filtered = (runs || []).filter((run) => {
       if (!run.hook_hint) return false;
-      if (run.generating !== true) return false;
-      if (run.terminal_hint || run.completion_hint) return false;
+      // A HELD cursor run has parked mid-turn (per-generation stop while a continuation /
+      // sub-agent is still in flight) but its watch is still holding — keep it visible past the
+      // generating/terminal/completion levers, which all fire at a mid-turn generation boundary.
+      if (run.held !== true) {
+        if (run.generating !== true) return false;
+        if (run.terminal_hint || run.completion_hint) return false;
+      }
       if (isUserRequestInterruptedPickerLabel(run.user_preview)) return false;
       if (source === 'cursor-local' && run.source === 'ssh') return false;
       if (source === 'cursor-remote' && run.source !== 'ssh') return false;
