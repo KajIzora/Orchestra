@@ -64,9 +64,15 @@
     // text is discarded immediately after scanning.
 
     let streamSniffEnabled = false;
+    // Separate, stricter opt-in (FollowUps §3.3): stream the assistant's MESSAGE TEXT, not just
+    // structural markers. Defaults OFF. When on, we also tee the body (even if streamSignals is off)
+    // and extract the reply text — see extractAssistantText below (mirror of lib/browser_stream_signals.js).
+    let streamBodyEnabled = false;
     window.addEventListener('chat-watch-stream-config', (event) => {
       try {
-        streamSniffEnabled = !!(event && event.detail && event.detail.enabled);
+        const d = (event && event.detail) || {};
+        streamSniffEnabled = !!d.enabled;
+        streamBodyEnabled = !!d.bodyEnabled;
       } catch (_) { /* ignore */ }
     });
 
@@ -156,6 +162,66 @@
       }
     }
 
+    // Realtime-WS content-append delta detector — mirror of lib/browser_stream_signals.js
+    // isChatgptRealtimeActivityFrame. Structural ONLY: matches the JSON-patch `append` op / message
+    // content pointer, never the appended value. Trailing metadata patches don't match.
+    function isChatgptRealtimeActivityFrame(text) {
+      const s = String(text || '');
+      return /"o"\s*:\s*"append"/i.test(s) || /"p"\s*:\s*"\/message\/content\/parts\//i.test(s);
+    }
+
+    // ── OPT-IN assistant-text extraction (FollowUps §3.3) — mirror of lib/browser_stream_signals.js ──
+    // Only ever invoked when streamBodyEnabled is true. Reads the model's message content, so it is
+    // held behind the separate body-streaming opt-in. Claude is reliable (text_delta); ChatGPT is
+    // best-effort (snapshot + append frames); Gemini is handled by the DOM path in the content script.
+    function decodeJsonStringBody(raw) {
+      try {
+        return JSON.parse('"' + String(raw) + '"');
+      } catch (_) {
+        return String(raw).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      }
+    }
+    function extractAssistantText(provider, text, acc, url) {
+      const s = String(text || '');
+      if (provider === 'claude') {
+        if (isClaudeTaskStatusEndpoint(url)) return;
+        const re = /"type"\s*:\s*"text_delta"\s*,\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"/ig;
+        let m;
+        while ((m = re.exec(s)) !== null) acc.text += decodeJsonStringBody(m[1]);
+      } else if (provider === 'chatgpt') {
+        const snapRe = /"content"\s*:\s*\{\s*"content_type"\s*:\s*"text"\s*,\s*"parts"\s*:\s*\[\s*"((?:\\.|[^"\\])*)"/ig;
+        let m;
+        let lastSnap = null;
+        while ((m = snapRe.exec(s)) !== null) lastSnap = m[1];
+        if (lastSnap !== null) { acc.text = decodeJsonStringBody(lastSnap); return; }
+        const partsAppendRe = /"p"\s*:\s*"\/message\/content\/parts\/0"\s*,\s*"o"\s*:\s*"append"\s*,\s*"v"\s*:\s*"((?:\\.|[^"\\])*)"/ig;
+        let appended = false;
+        while ((m = partsAppendRe.exec(s)) !== null) { acc.text += decodeJsonStringBody(m[1]); appended = true; }
+        if (appended) return;
+        const bareAppendRe = /(^|[\n,{])\s*"v"\s*:\s*"((?:\\.|[^"\\])*)"\s*(?=[,}\n]|$)/ig;
+        while ((m = bareAppendRe.exec(s)) !== null) acc.text += decodeJsonStringBody(m[2]);
+      }
+    }
+    // Post the current assistant text to the isolated-world content script, which forwards it to the
+    // background worker (→ POST /api/browser-chats/stream-body). `final` marks the last emit of a turn.
+    function emitStreamBody(provider, textAcc, url, final) {
+      try {
+        const text = String(textAcc.text || '');
+        if (!text && !final) return;
+        window.dispatchEvent(new CustomEvent('chat-watch-stream-body', {
+          detail: {
+            provider,
+            conversation_id: textAcc.conversation_id || '',
+            turn_id: textAcc.turn_id || '',
+            text,
+            final: final === true,
+            source: 'stream',
+            t: Date.now(),
+          },
+        }));
+      } catch (_) { /* ignore */ }
+    }
+
     function emitStreamSignals(provider, method, acc, url, opts) {
       const o = opts || {};
       const base = {
@@ -188,10 +254,18 @@
     // original response on its own stream; this `stream` belongs to our clone, so we read it
     // directly — no inner tee needed (teeing here would leave an unread branch that stalls the
     // reader via backpressure). Decoder output is scanned then discarded.
+    // Throttle for streaming assistant-text emits (§3.3). One evolving snapshot every ~1.5s while the
+    // reply grows, so a long generation posts a bounded number of updates (the server keeps ONE
+    // current message; the live-feed adapter mutates ONE note in place).
+    const STREAM_BODY_EMIT_MS = 1500;
     function sniffReadableStream(provider, method, stream, url) {
       const acc = { conversation_id: '', turn_id: '', markers: new Set() };
+      // Text accumulator for the opt-in body-streaming path; carries ids alongside so the emit can be
+      // attributed. Text is only ever touched when streamBodyEnabled is true.
+      const textAcc = { text: '', conversation_id: '', turn_id: '' };
       const isTaskStatus = isClaudeTaskStatusEndpoint(url);
       const startedAt = Date.now();
+      let lastBodyEmitAt = 0;
       (async () => {
         try {
           const reader = stream.getReader();
@@ -203,14 +277,34 @@
             const { value, done } = await reader.read();
             if (done) break;
             const chunk = typeof value === 'string' ? value : decoder.decode(value, { stream: true });
-            streamScanChunk(provider, tail + chunk, acc, url);
-            tail = (tail + chunk).slice(-4096);
+            const scanText = tail + chunk;
+            streamScanChunk(provider, scanText, acc, url);
+            // Text extraction is incremental per chunk (deltas append) — feed ONLY the fresh chunk,
+            // not the rolling tail, so append-style frames aren't double-counted.
+            if (streamBodyEnabled && !isTaskStatus) {
+              extractAssistantText(provider, chunk, textAcc, url);
+              textAcc.conversation_id = textAcc.conversation_id || acc.conversation_id;
+              textAcc.turn_id = textAcc.turn_id || acc.turn_id;
+              const now = Date.now();
+              if (now - lastBodyEmitAt >= STREAM_BODY_EMIT_MS) {
+                lastBodyEmitAt = now;
+                emitStreamBody(provider, textAcc, url, false);
+              }
+            }
+            tail = scanText.slice(-4096);
           }
           // The body simply ending is a done edge for streamed generations — but NOT for the claude
           // task-status poll, where each poll's body ends every few seconds (its done lives in the
           // status enum, handled by streamScanChunk).
           if (!isTaskStatus) acc.markers.add('end_of_stream');
           emitStreamSignals(provider, method, acc, url, { bodyMs: Date.now() - startedAt });
+          // Final text emit at stream end (the content script also sends a DOM final on the
+          // generating→idle edge; the server keeps whichever is longer — see ingestStreamBody).
+          if (streamBodyEnabled && !isTaskStatus) {
+            textAcc.conversation_id = textAcc.conversation_id || acc.conversation_id;
+            textAcc.turn_id = textAcc.turn_id || acc.turn_id;
+            emitStreamBody(provider, textAcc, url, true);
+          }
         } catch (_) {
           // Stream errored/aborted — still emit whatever structural fields we captured.
           try { emitStreamSignals(provider, method, acc, url, { bodyMs: Date.now() - startedAt }); } catch (__) { /* ignore */ }
@@ -235,7 +329,9 @@
         //      those; this removes the frame for the requests we don't care about.
         let provider = null;
         let url = '';
-        if (streamSniffEnabled) {
+        // Tee when EITHER opt-in is on: structural sniffing OR body-text streaming (§3.3). Both
+        // default off, so the common case is still the pure pass-through below.
+        if (streamSniffEnabled || streamBodyEnabled) {
           try {
             url = typeof input === 'string' ? input : (input && input.url) || '';
           } catch (_) { url = ''; }
@@ -280,7 +376,7 @@
       };
       XHR.prototype.send = function patchedSend() {
         try {
-          if (streamSniffEnabled) {
+          if (streamSniffEnabled || streamBodyEnabled) {
             const url = this.__chatWatchStreamUrl || '';
             const provider = streamProviderForUrl(url);
             if (provider) {
@@ -294,6 +390,13 @@
                   // Not a done edge for the claude task-status poll (each poll completes; see fetch path).
                   if (!isClaudeTaskStatusEndpoint(url)) acc.markers.add('end_of_stream');
                   emitStreamSignals(provider, this.__chatWatchStreamMethod || 'GET', acc, url, { bodyMs: Date.now() - sentAt });
+                  // Opt-in body text: an XHR body is already fully buffered, so this is a single final
+                  // emit (no intermediate streaming). Skips the claude task-status poll.
+                  if (streamBodyEnabled && !isClaudeTaskStatusEndpoint(url)) {
+                    const textAcc = { text: '', conversation_id: acc.conversation_id, turn_id: acc.turn_id };
+                    extractAssistantText(provider, text, textAcc, url);
+                    if (textAcc.text) emitStreamBody(provider, textAcc, url, true);
+                  }
                 } catch (_) { /* ignore */ }
               });
             }
@@ -316,6 +419,13 @@
     // are emitted as they appear (the terminal [DONE]/message_stop IS the live done edge) and the
     // marker set resets after each emit so a later turn's terminal frame emits again. A short
     // re-emit throttle keeps a burst of frames from duplicating the same marker.
+    //
+    // A handoff turn's real answer streams here as content-append delta frames that carry no terminal
+    // marker — so without a heartbeat the activity-quiescence GT sees nothing after the ~2s handoff
+    // and fires done ~40s+ early (observed 2026-07-13 happy-path-long). We emit a structural-only
+    // `stream_delta` per content-append frame; the same re-emit throttle collapses the burst to one
+    // heartbeat every REALTIME_MARKER_REEMIT_MS, which keeps the quiescence clock alive across the WS
+    // stream and lands done on the last delta. `stream_delta` is inert to production (lib/browser_chat).
     const REALTIME_MARKER_REEMIT_MS = 3000;
     function sniffRealtimeChannel(provider, channelLabel, target, url) {
       const acc = { conversation_id: '', turn_id: '', markers: new Set(), handoff: false };
@@ -342,6 +452,9 @@
         try {
           if (!streamSniffEnabled || typeof data !== 'string' || !data) return;
           streamScanChunk(provider, data, acc, url);
+          // Realtime content heartbeat: a ChatGPT content-append delta over the WS is generation
+          // activity even though it carries no terminal marker. Emit a throttled `stream_delta`.
+          if (provider === 'chatgpt' && isChatgptRealtimeActivityFrame(data)) acc.markers.add('stream_delta');
           emitFresh();
         } catch (_) { /* never break the page */ }
       };

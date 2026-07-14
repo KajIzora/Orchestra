@@ -5,6 +5,12 @@
     root.DefaultLaunchCommands = factory();
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  // Cursor's LaunchServices bundle id. `open -b <bundle> <folder>` focuses the
+  // folder's window and switches to its Space in ~0.05s, vs ~1.1s for the
+  // `cursor` node CLI. Keep in sync with lib/workspace_items.js, lib/focus.js,
+  // and scripts/ax_focus_window.swift.
+  const CURSOR_BUNDLE_ID = 'com.todesktop.230313mzl4w4u92';
+
   function shellQuote(value) {
     return `'${String(value).replace(/'/g, `'\\''`)}'`;
   }
@@ -78,7 +84,7 @@
       if (!host) throw new Error('Remote host is required');
       return `cursor --remote ssh-remote+${host} ${shellQuote(path)}`;
     }
-    return `cursor ${shellQuote(path)}`;
+    return `open -b ${CURSOR_BUNDLE_ID} ${shellQuote(path)}`;
   }
 
   function cursorWindowTitleMatch(workspacePath) {
@@ -200,6 +206,7 @@
   }
 
   return {
+    CURSOR_BUNDLE_ID,
     shellQuote,
     escapeAppleScriptString,
     buildFocusChromeWebPageCommand,

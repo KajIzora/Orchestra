@@ -1,11 +1,14 @@
 const STORAGE_KEYS = {
   debug: 'taskAppChatWatchDebug',
   sendPromptPreviews: 'taskAppChatWatchSendPromptPreviews',
+  // FollowUps §3.3: stream the assistant's message text into Orchestra. Default OFF.
+  streamBody: 'taskAppChatWatchStreamBody',
 };
 
 const inspectButton = document.getElementById('inspect');
 const debugToggle = document.getElementById('debug-toggle');
 const promptPreviewToggle = document.getElementById('prompt-preview-toggle');
+const streamBodyToggle = document.getElementById('stream-body-toggle');
 const statusEl = document.getElementById('status');
 const summaryEl = document.getElementById('summary');
 const jsonEl = document.getElementById('json');
@@ -66,9 +69,14 @@ function renderSummary(snapshot) {
 }
 
 async function loadSettings() {
-  const stored = await chrome.storage.local.get([STORAGE_KEYS.debug, STORAGE_KEYS.sendPromptPreviews]);
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEYS.debug,
+    STORAGE_KEYS.sendPromptPreviews,
+    STORAGE_KEYS.streamBody,
+  ]);
   debugToggle.checked = !!stored[STORAGE_KEYS.debug];
   promptPreviewToggle.checked = !!stored[STORAGE_KEYS.sendPromptPreviews];
+  streamBodyToggle.checked = !!stored[STORAGE_KEYS.streamBody];
 }
 
 async function saveSetting(key, value) {
@@ -130,6 +138,12 @@ debugToggle.addEventListener('change', () => {
 
 promptPreviewToggle.addEventListener('change', () => {
   saveSetting(STORAGE_KEYS.sendPromptPreviews, promptPreviewToggle.checked).catch((err) => {
+    setStatus(err.message || String(err), true);
+  });
+});
+
+streamBodyToggle.addEventListener('change', () => {
+  saveSetting(STORAGE_KEYS.streamBody, streamBodyToggle.checked).catch((err) => {
     setStatus(err.message || String(err), true);
   });
 });

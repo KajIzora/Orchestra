@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Rebuild and install stable Orchestra.app (daily desktop). Data: ~/.orchestra/stable, port 47824.
+# Run from any Orchestra checkout or worktree; builds and installs code from that tree.
 # Usage: ./stable-update.sh [--sign]
 #        HOST=0.0.0.0 ./stable-update.sh   # bake LAN host into the installed app
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/ensure_repo_ready.sh
+source "$_SCRIPT_DIR/scripts/ensure_repo_ready.sh"
+prepare_orchestra_repo "$_SCRIPT_DIR"
+ROOT="$ORCHESTRA_ROOT"
 _saved_data="${ORCHESTRA_DATA_DIR-}"
 _saved_host="${HOST-}"
 _saved_port="${PORT-}"
@@ -30,6 +35,7 @@ if [[ ! -e "${STABLE_DIR}/data.json" && -f "${LEGACY}/data.json" ]]; then
 fi
 
 export ORCHESTRA_DATA_DIR HOST PORT
+echo "[stable-update] Orchestra root: ${ROOT}"
 echo "[stable-update] ORCHESTRA_DATA_DIR=${ORCHESTRA_DATA_DIR} HOST=${HOST} PORT=${PORT}"
 echo "[stable-update] Running rebuild.sh --install-applications $*"
 cd "${ROOT}"

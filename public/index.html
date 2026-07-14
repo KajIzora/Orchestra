@@ -4,9 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Orchestra</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
     <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="live-feed.css" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" defer></script>
     <script src="default_launch_commands.js" defer></script>
+    <script src="pixel-bots.js" defer></script>
+    <script src="live_feed_derive.js" defer></script>
+    <script src="live_feed_ui.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -26,6 +32,27 @@
         <div class="modal-actions">
           <button type="button" id="launch-preset-use" class="primary-button">Use command</button>
           <button type="button" id="launch-preset-cancel" class="ghost-button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="shell-command-modal" class="modal-overlay" hidden>
+      <div class="modal shell-command-modal" role="dialog" aria-labelledby="shell-command-title" aria-modal="true">
+        <h3 id="shell-command-title" class="modal-title">Advanced shell command</h3>
+        <p class="modal-hint">Write a longer shell command. The text is saved back to the shell command field.</p>
+        <div class="shell-editor" data-shell-editor>
+          <pre class="shell-editor-highlight" aria-hidden="true"><code id="shell-command-highlight"></code></pre>
+          <textarea
+            id="shell-command-textarea"
+            class="shell-editor-textarea"
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="off"
+            aria-label="Shell command"
+          ></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="shell-command-use" class="primary-button">Use command</button>
+          <button type="button" id="shell-command-cancel" class="ghost-button">Cancel</button>
         </div>
       </div>
     </div>
@@ -59,9 +86,9 @@
     </div>
     <div id="cursor-run-modal" class="modal-overlay" hidden>
       <div class="modal" role="dialog" aria-labelledby="cursor-run-modal-title" aria-modal="true">
-        <h3 id="cursor-run-modal-title" class="modal-title">Working — choose source</h3>
+        <h3 id="cursor-run-modal-title" class="modal-title">Tracking — choose source</h3>
         <p class="modal-hint">
-          Pick an agent to track for this task. The task shows <strong>working</strong> and auto-clears to open when the
+          Pick an agent to track for this task. The task shows <strong>tracking</strong> and auto-clears to open when the
           selected agent completes. Browser ChatGPT, Claude, and Gemini sessions appear under their provider and need the
           Orchestra Chat Watch Chrome extension.
         </p>
@@ -76,7 +103,7 @@
               aria-selected="true"
               aria-controls="cursor-watch-panel"
             >
-              Working
+              Tracking
             </button>
             <button
               type="button"
@@ -97,11 +124,21 @@
             aria-labelledby="cursor-watch-tab"
           >
             <div id="watch-source-choices" class="watch-source-choices">
-              <button type="button" class="ghost-button" data-watch-kind="cursor">Cursor</button>
-              <button type="button" class="ghost-button" data-watch-kind="openai">ChatGPT</button>
-              <button type="button" class="ghost-button" data-watch-kind="claude">Claude</button>
-              <button type="button" class="ghost-button" data-watch-kind="gemini">Gemini</button>
-              <button type="button" class="ghost-button" data-watch-kind="process">Process</button>
+              <button type="button" class="ghost-button" data-watch-kind="cursor">
+                <svg class="watch-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M12 2 21 7v10l-9 5-9-5V7z"/><path d="M12 2v10M12 12l9-5M12 12 3 7"/></svg>Cursor
+              </button>
+              <button type="button" class="ghost-button" data-watch-kind="openai">
+                <svg class="watch-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><ellipse cx="12" cy="12" rx="3.6" ry="8.4"/><ellipse cx="12" cy="12" rx="3.6" ry="8.4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="3.6" ry="8.4" transform="rotate(120 12 12)"/></svg>ChatGPT
+              </button>
+              <button type="button" class="ghost-button" data-watch-kind="claude">
+                <svg class="watch-source-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg>Claude
+              </button>
+              <button type="button" class="ghost-button" data-watch-kind="gemini">
+                <svg class="watch-source-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2c.4 5.2 4.4 9.2 9.6 9.6-5.2.4-9.2 4.4-9.6 9.6-.4-5.2-4.4-9.2-9.6-9.6C7.6 11.2 11.6 7.2 12 2Z"/></svg>Gemini
+              </button>
+              <button type="button" class="ghost-button" data-watch-kind="process">
+                <svg class="watch-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>Process
+              </button>
             </div>
             <div id="watch-subsource-toggle" class="watch-subsource-toggle" hidden></div>
             <input
@@ -164,9 +201,55 @@
           </div>
         </div>
         <div class="modal-actions">
+          <button type="button" id="cursor-wait-stuck" class="ghost-button modal-toggle">Stuck</button>
+          <button type="button" id="cursor-wait-backlog" class="ghost-button modal-toggle">Backlog</button>
+          <button type="button" id="cursor-wait-focus" class="ghost-button modal-toggle">Focus</button>
+          <button type="button" id="cursor-wait-context" class="ghost-button modal-toggle">Context</button>
+          <button type="button" id="cursor-wait-add-title" class="ghost-button">Add Header</button>
           <button type="button" id="cursor-wait-set-done" class="ghost-button">Set to done</button>
-          <button type="button" id="cursor-wait-manual" class="ghost-button">Waiting only (no watcher)</button>
+          <button type="button" id="cursor-wait-manual" class="ghost-button modal-toggle">Waiting</button>
           <button type="button" id="cursor-modal-cancel" class="ghost-button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="add-title-modal" class="modal-overlay" hidden>
+      <form class="modal add-title-modal" role="dialog" aria-labelledby="add-title-modal-title" aria-modal="true">
+        <h3 id="add-title-modal-title" class="modal-title">Add Header</h3>
+        <p class="modal-hint">Set the header's provider, chat title, platform and location yourself. These get overwritten if you watch an agent.</p>
+        <label class="field-label" for="add-title-provider">Provider</label>
+        <input id="add-title-provider" class="add-title-input" type="text" placeholder="e.g. Claude, Cursor, Gemini" />
+        <label class="field-label" for="add-title-text">Chat title</label>
+        <input id="add-title-text" class="add-title-input" type="text" placeholder="Chat title" />
+        <label class="field-label">Platform</label>
+        <div id="add-title-platform" class="platform-picker"></div>
+        <label class="field-label" for="add-title-location">Location</label>
+        <input id="add-title-location" class="add-title-input" type="text" placeholder="e.g. OrchestraTestEnv" />
+        <div class="modal-actions">
+          <button type="submit" id="add-title-save" class="primary-button">Save</button>
+          <button type="button" id="add-title-cancel" class="ghost-button">Cancel</button>
+        </div>
+      </form>
+    </div>
+    <div id="context-note-modal" class="modal-overlay" hidden>
+      <div class="modal context-note-modal" role="dialog" aria-labelledby="context-note-modal-title" aria-modal="true">
+        <div class="context-note-head">
+          <h3 id="context-note-modal-title" class="modal-title">Context</h3>
+          <span id="context-note-subtitle" class="context-note-subtitle"></span>
+        </div>
+        <p class="modal-hint">A page you write for yourself — where you left off, what's next, anything you'd forget when you come back. Markdown supported (#&nbsp;headings, -&nbsp;bullets, **bold**, `code`, [links](url)).</p>
+        <div id="context-note-view" class="context-note-view"></div>
+        <textarea
+          id="context-note-textarea"
+          class="context-note-textarea"
+          placeholder="# Where I left off&#10;- waiting on the API key from Bob&#10;- next: retry the token refresh flow&#10;&#10;The bug only repros when the session is stale."
+          spellcheck="true"
+          hidden
+        ></textarea>
+        <div class="modal-actions">
+          <button type="button" id="context-note-edit" class="primary-button">Edit</button>
+          <button type="button" id="context-note-save" class="primary-button" hidden>Save</button>
+          <button type="button" id="context-note-cancel" class="ghost-button" hidden>Cancel</button>
+          <button type="button" id="context-note-close" class="ghost-button">Close</button>
         </div>
       </div>
     </div>
@@ -260,16 +343,12 @@
               <h2 id="project-name"></h2>
               <button id="edit-project-btn" class="icon-button" title="Edit project">Edit</button>
               <button id="delete-project-btn" class="icon-button danger" title="Delete project">Delete</button>
-            </div>
-            <div class="pane-actions">
-              <button type="button" id="toggle-task-backlog-btn" class="ghost-button pane-action-btn">
-                Show Backlog
-              </button>
-              <button id="workspace-btn" class="primary-button pane-action-btn">Open Workspace</button>
+              <button id="toggle-all-progress-btn" class="icon-button" title="Hide or show progress on every task in this project">Hide all progress</button>
+              <button type="button" id="toggle-task-backlog-btn" class="icon-button">Show Backlog</button>
+              <button type="button" id="workspace-btn" class="icon-button pane-header-end" title="Open Workspace">Open Workspace</button>
             </div>
           </header>
           <div class="project-task-summary-pane">
-            <p class="project-task-summary-label">Task summary</p>
             <p id="project-task-summary-display" class="project-task-summary-display">No task summary set.</p>
           </div>
           <form id="edit-project-form" class="edit-project-form" hidden>
@@ -316,6 +395,11 @@
               <span>Back Log project</span>
             </label>
             <p class="hint">Back Log projects stay in their folder and do not show in the menu bar.</p>
+            <label class="checkbox-label">
+              <input name="live_mode" type="checkbox" />
+              <span>Live mode</span>
+            </label>
+            <p class="hint">Show what tracked agents are doing inline in each task row — the status pill gets a caret that expands the live feed. Off = plain task list. Saved per project.</p>
             <div class="color-row" role="radiogroup" aria-label="Color"></div>
             <div class="form-actions">
               <button type="submit" class="primary-button">Save</button>
@@ -323,20 +407,32 @@
             </div>
           </form>
           <ul id="task-list" class="task-list"></ul>
-          <form id="new-task-form" class="new-task-form">
-            <textarea
-              name="text"
-              rows="2"
-              placeholder="+ Add task (Shift+Enter for newline)"
-              autocomplete="off"
-              spellcheck="true"
-            ></textarea>
-          </form>
           <footer class="pane-footer">
             <span id="task-summary"></span>
           </footer>
+          <form id="new-task-form" class="new-task-form">
+            <div class="new-task-form-row">
+              <textarea
+                name="text"
+                rows="2"
+                placeholder="+ Add task (Shift+Enter for newline)"
+                autocomplete="off"
+                spellcheck="true"
+              ></textarea>
+              <div class="new-task-form-actions">
+                <button type="button" id="new-task-monitor" class="pill pill-toggle monitor off"></button>
+              </div>
+            </div>
+          </form>
         </article>
       </section>
+      <div
+        class="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize projects panel"
+        title="Drag to resize · double-click to reset"
+      ></div>
     </main>
   </body>
 </html>

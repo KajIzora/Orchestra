@@ -86,8 +86,28 @@ if [[ "$INSTALL_TO_APPLICATIONS" == true ]]; then
 fi
 
 if [[ "$SIGN_APP" == true ]]; then
-  echo "Rebuilding signed desktop app bundle..."
-  npm run desktop:pack
+  # Sign with a STABLE identity so macOS keeps its TCC grants (Accessibility / Automation)
+  # across rebuilds. Ad-hoc signing (the default path below) changes the app's signature
+  # every build, so macOS treats each rebuild as a new app and the permissions reset.
+  # Identity precedence: $ORCHESTRA_SIGN_IDENTITY, else the first valid code-signing
+  # identity in the keychain (by SHA-1, so names with spaces/parens don't need quoting).
+  # hardenedRuntime is forced off: this is a locally-installed, non-notarized app, and off
+  # keeps it behaving exactly like the ad-hoc build (spawning the server, running the AX
+  # helper binaries) with no entitlements needed — the only change is a persistent identity.
+  SIGN_IDENTITY="${ORCHESTRA_SIGN_IDENTITY:-}"
+  if [[ -z "$SIGN_IDENTITY" ]]; then
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning | awk '/[0-9]+\)/ {print $2; exit}')"
+  fi
+  if [[ -z "$SIGN_IDENTITY" ]]; then
+    echo "--sign: no code-signing identity found. Set ORCHESTRA_SIGN_IDENTITY or add one in" >&2
+    echo "        Keychain Access. Falling back to ad-hoc (permissions will reset each rebuild)." >&2
+    CSC_IDENTITY_AUTO_DISCOVERY=false npm run desktop:pack -- -c.mac.identity=null
+  else
+    echo "Rebuilding desktop app bundle signed with identity: $SIGN_IDENTITY"
+    CSC_IDENTITY_AUTO_DISCOVERY=false npm run desktop:pack -- \
+      -c.mac.identity="$SIGN_IDENTITY" \
+      -c.mac.hardenedRuntime=false
+  fi
 else
   echo "Rebuilding unsigned desktop app bundle..."
   CSC_IDENTITY_AUTO_DISCOVERY=false npm run desktop:pack -- -c.mac.identity=null

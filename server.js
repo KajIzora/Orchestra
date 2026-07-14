@@ -24,6 +24,7 @@ const {
 } = require('./lib/workspace_scope');
 const {
   discoverCursorRuns,
+  discoverCursorRunsForPicker,
   assertAllowedTranscriptPath,
   findLocalTranscriptPathByRunId,
   findRemoteTranscriptPathByRunId,
@@ -34,6 +35,7 @@ const {
   cursorTranscriptAskQuestionRecordedSince,
   readCursorTranscriptText,
 } = require('./lib/cursor_tracker');
+const { mergeLocalCursorDiscoveryPickerRuns } = require('./lib/cursor_picker_from_hooks');
 const {
   assertValidRemoteSource,
   createSshRunner,
@@ -44,7 +46,7 @@ const {
   REMOTE_HOOKS_JSON_PATH,
   REMOTE_HOOK_LOG_PATH,
 } = require('./lib/remote_cursor_tracker');
-const { wrapNonOverlapping } = require('./lib/poll_guard');
+const { wrapNonOverlapping, wrapShortTtlMemo } = require('./lib/poll_guard');
 const {
   normalizeStoredCursorRemotes,
   assignProjectCursorRemotes,
@@ -78,9 +80,10 @@ const {
   markCancelledWatchClear,
   resumeWatchTracking,
   isPermissionAttentionReason,
+  claudeGateKindFromHint,
   cursorCompletedHintContinuationGate,
 } = require('./lib/watch_tracker');
-const { createBrowserChatStore, applyBrowserChatCompletion, applyBrowserChatResume, BROWSER_CHAT_RESUME_QUIET_MS } = require('./lib/browser_chat');
+const { createBrowserChatStore, applyBrowserChatCompletion, applyBrowserChatResume, markBrowserChatStreamOptin, BROWSER_CHAT_RESUME_QUIET_MS } = require('./lib/browser_chat');
 const { createCursorHookStore, normalizeConversationId } = require('./lib/cursor_hook_store');
 const {
   createCursorCliPermissionTracker,
@@ -88,13 +91,39 @@ const {
   loadCursorCliConfigRemote,
   isCursorCliHook,
 } = require('./lib/cursor_cli_permission');
-const { createCursorChatDbReader, remotePendingAskQuestion, findChatDbDir } = require('./lib/cursor_chat_db');
+const {
+  createCursorChatDbReader,
+  remotePendingAskQuestion,
+  findChatDbDir,
+  chatNameForConversation,
+  remoteChatNameForConversation,
+} = require('./lib/cursor_chat_db');
 const { createCursorCliContinuationWatcher } = require('./lib/cursor_cli_continuation');
 const { createRendererPermissionProbe } = require('./lib/cursor_renderer_permission_probe');
 const { createAgentExecPermissionProbe } = require('./lib/cursor_agent_exec_probe');
 const { createComposerHeadersGateProbe } = require('./lib/cursor_subagent_gate_probe');
 const { applyCursorRendererPermissionEvents } = require('./lib/cursor_renderer_watch');
 const { createHookEventLog } = require('./lib/hook_event_log');
+const { createLiveFeedService } = require('./lib/live_feed_service');
+const { createCodexRolloutNotesAdapter } = require('./lib/live_feed_codex_notes');
+const {
+  createCursorQuestionPull,
+  cursorQuestionHintSinceMs,
+} = require('./lib/cursor_live_question_adapter');
+const { createCoworkAuditTailAdapter } = require('./lib/cowork_live_adapter');
+const { createGrokSessionTailAdapter } = require('./lib/grok_live_adapter');
+const {
+  discoverGrokRuns,
+  assertAllowedGrokSessionDir,
+  resolveGrokSessionDirById,
+  grokTurnCompletedSince,
+  grokWatchActiveGenerationSince,
+} = require('./lib/grok_session_tracker');
+const { isGrokOriginHookBody, logGrokOriginOnce } = require('./lib/grok_origin');
+const { createAgyTranscriptTailAdapter } = require('./lib/live_agy_tail_adapter');
+const { createBrowserStreamAdapter } = require('./lib/browser_stream_adapter');
+const { createTerminalTailAdapter } = require('./lib/live_terminal_adapter');
+const { resolveTtyForPid } = require('./lib/tty_resolver');
 const { createCodexHookStore } = require('./lib/codex_hook_store');
 const { applyCodexHookCompletion, applyCodexHookResume } = require('./lib/codex_hook_completion');
 const { getCodexTaskAppHookScript } = require('./lib/codex_hook_script');
@@ -146,12 +175,18 @@ const {
   enrichCodexPickerRunWithTranscript,
   codexWatchActiveGenerationSince,
   remoteCodexWatchActiveGenerationSince,
+  discoverCodexRuns,
 } = require('./lib/codex_tracker');
+const {
+  snapshotToLocalPickerRun,
+  mergeLocalCodexDiscoveryPickerRuns,
+} = require('./lib/codex_picker_from_hooks');
 const {
   claudePermissionCompletionHintIsStale,
   claudePausedWatchShouldCancel,
   assertAllowedClaudeTranscriptPath,
   assertAllowedRemoteClaudeTranscriptPath,
+  discoverClaudeRuns,
   discoverRemoteClaudeRuns,
   remoteClaudeWatchCompletionSince,
   claudeTranscriptWatchCompletionSince,
@@ -165,8 +200,13 @@ const {
   pickerRunsFromClaudeSnapshots,
   remoteHostsNeedingClaudeDiscovery,
   mergeClaudeDiscoveryPickerRuns,
+  mergeLocalClaudeDiscoveryPickerRuns,
 } = require('./lib/claude_picker_from_hooks');
-const { pickerRunsFromGeminiSnapshots } = require('./lib/gemini_picker_from_hooks');
+const {
+  pickerRunsFromGeminiSnapshots,
+  mergeLocalGeminiDiscoveryPickerRuns,
+} = require('./lib/gemini_picker_from_hooks');
+const { discoverLocalAgyRuns } = require('./lib/gemini_discovery_from_db');
 const {
   readLocalAgyCliCancelSignals,
   readRemoteAgyCliCancelSignals,
@@ -202,7 +242,11 @@ const {
   remoteGeminiTaskCompletedSince,
 } = require('./lib/gemini_tracker');
 const { readRemoteGeminiHookDebugEvents } = require('./lib/remote_gemini_hook_tracker');
-const { applyActiveGenerationStaleCutoff, toIso } = require('./lib/active_generation');
+const {
+  applyActiveGenerationStaleCutoff,
+  toIso,
+  ACTIVE_GENERATION_STALE_MS,
+} = require('./lib/active_generation');
 const {
   getOrCreateHookToken,
   getOrCreateAppToken,
@@ -229,14 +273,17 @@ const CONFIG_PATHS = new Set([
   '/api/codex-hooks/config',
   '/api/claude-hooks/config',
   '/api/gemini-hooks/config',
+  '/api/terminal/config',
 ]);
 const HOOK_AUTHED_WRITE_PREFIXES = [
   '/api/cursor-hooks/event',
   '/api/codex-hooks/event',
   '/api/claude-hooks/event',
   '/api/gemini-hooks/event',
+  '/api/terminal/event',
   '/api/browser-chats/snapshot',
   '/api/browser-chats/stream-signal',
+  '/api/browser-chats/stream-body',
   '/api/browser-chats/tab-closed',
   '/api/browser-chats/tabs-sync',
   '/api/browser-chats/complete',
@@ -423,6 +470,60 @@ const claudeHookStore = createClaudeHookStore({
 // Lossless raw-hook tap: keeps exact /event bodies briefly so a signal-recording
 // session can capture them verbatim. In-memory only; never persisted by the server.
 const hookEventLog = createHookEventLog();
+// Live-feed core (Lane C Phase 2a): normalized per-task LiveTurnEvent rings, lazily filled from
+// the raw hook tap on each GET /api/projects/:id/live-feed poll. Pure in-memory — additive-only
+// beside /api/state (plain mode never calls it).
+// `liveFeedTailAdapters` is held by reference so Phase-2b pull adapters (which need the service's
+// ring) can be pushed AFTER the service is built; the service iterates it each poll.
+const liveFeedTailAdapters = [];
+// Phase-2b cursor-cli question pull (Seam B): cursor has no AskQuestion hook, so the live feed's
+// gate_open/gate_answered question events come from the chat store.db head (payload carried
+// pre-answer). Reuses the same mtime-gated cursorChatDbReader the watch poller uses, so a poll
+// shares one store.db read. Fail-safe/bounded; no-ops for IDE/ssh (store.db absent locally).
+const cursorQuestionPull = createCursorQuestionPull({ chatDbReader: cursorChatDbReader });
+const liveFeedService = createLiveFeedService({
+  hookEventLog,
+  tailAdapters: liveFeedTailAdapters,
+  pullAdapters: { cursor: cursorQuestionPull.pull },
+});
+// Phase-2b codex rollout-tail NOTES adapter (mid-turn agent_message → note). Default ON; disable
+// with ORCHESTRA_LIVEFEED_CODEX_ROLLOUT_NOTES=0 for SSH-frugal setups (local tail is ~free and
+// bounded — 385 B/s measured, post-done growth 0). The off-switch forces ZERO reads local AND
+// remote. Closure-L6: an ssh codex watch is now tailed too, over the injected runSsh (same `tail -c`
+// primitive as the other remote codex readers) using a position-delta read (size − lastSize) so the
+// wire cost tracks the rollout's growth. Dormant with no ssh codex watch; the LIVE remote-host byte-rate
+// measurement is a serialized ssh wave — docs/.../ClosureCampaign/evidence/l6/codex-ssh-build-notes.md.
+liveFeedTailAdapters.push(createCodexRolloutNotesAdapter({ ring: liveFeedService.ring, runSsh: createSshRunner() }));
+// Phase-2b cowork audit-tail adapter (Lane D): claude_cowork has NO raw hook slice, so its ring is
+// filled from the T3-capable audit.jsonl (prompt/note/tool/gate/stop). Read-only, bounded, poll-
+// guarded, FAIL SAFE (unlinked/unreadable ⇒ lifecycle-only). Local cowork watches; the audit is on
+// the same machine as the desktop app.
+liveFeedTailAdapters.push(createCoworkAuditTailAdapter({ ring: liveFeedService.ring }));
+// R2c grok session-tail adapter: grok has NO raw hook slice (fake-HOME shim keeps the vendor-bug
+// claude/cursor taps quiet), so its ring is filled from the LIVE per-session events.jsonl
+// (register + kind-level gates + turn-end stop text = the declared tier-1 cell). Read-only,
+// bounded, poll-guarded, FAIL SAFE (unlinked/unreadable ⇒ lifecycle-only). Local grok watches
+// only; R2d runs the ssh leg.
+liveFeedTailAdapters.push(createGrokSessionTailAdapter({ ring: liveFeedService.ring }));
+// Phase-2b agy/gemini transcript_full.jsonl tail adapter: prompt rows (real turn boundaries),
+// PLANNER_RESPONSE notes, toolSummary/toolAction purpose enrichment, ASK_QUESTION answers.
+// Hooks stay authoritative for the question gate (payload is hook-carried — agy-2b-notes.md §1);
+// the tail NEVER opens a permission gate (that channel is DB-only). Default ON; disable with
+// ORCHESTRA_LIVEFEED_AGY_TRANSCRIPT_TAIL=0. Local agy watches only; ssh is Phase-3.
+liveFeedTailAdapters.push(createAgyTranscriptTailAdapter({ ring: liveFeedService.ring }));
+// §3.1 terminal output capture: enrich a linked terminal PROCESS watch (tier 0 → 2) with command
+// lifecycle (the register) + output tail (notes). PUSH-driven — a companion producer (Cursor
+// shell-integration extension; Terminal.app/iTerm2 pollers; file-redirect fallback) POSTs to
+// /api/terminal/event. Unlike the file-tail adapters this one also owns the ingest buffer + token.
+// Disable with ORCHESTRA_LIVEFEED_TERMINAL=0.
+const terminalTailAdapter = createTerminalTailAdapter({
+  ring: liveFeedService.ring,
+  token: resolveHookToken('TERMINAL_TOKEN', 'terminal'),
+  // Match a picker-linked process watch (keyed on the child's tty) to the extension's output
+  // (tagged with the terminal's shell pid) by resolving that pid → its controlling tty.
+  resolveTty: (pid) => resolveTtyForPid(pid),
+});
+liveFeedTailAdapters.push(terminalTailAdapter);
 const geminiHookStore = createGeminiHookStore({ token: resolveHookToken('GEMINI_HOOK_TOKEN', 'gemini') });
 // Test/diagnostic toggle: when set, the only agy-cli "done" completion is the primary
 // Stop+fullyIdle+NO_TOOL_CALL hook — the secondary idle-quiescence and transcript-done paths
@@ -606,37 +707,6 @@ function rollUpSnapshotsForPicker(provider, snapshots) {
   return Array.isArray(snapshots) ? snapshots : [];
 }
 
-function snapshotToLocalPickerRun(snap) {
-  const updatedMs = Date.parse(snap.updated_at || '') || 0;
-  const hookGenerating = !!snap.generating && !snap.completion_hint;
-  const activeGen = applyActiveGenerationStaleCutoff(
-    {
-      generating: hookGenerating,
-      start_signal_at: toIso(updatedMs),
-      last_activity_at: toIso(updatedMs),
-      inactive_reason: hookGenerating ? '' : 'completion_signal',
-    },
-    { mtimeMs: updatedMs }
-  );
-  return {
-    kind: 'ide_agent',
-    provider: 'codex',
-    source: 'local',
-    session_id: snap.session_id || '',
-    transcript_path: snap.transcript_path || '',
-    title: snap.title || '',
-    workspace_path: snap.workspace_path || '',
-    updated_at: snap.updated_at || '',
-    mtime_ms: updatedMs,
-    last_user_preview: snap.last_user_preview || snap.session_id || '',
-    host: null,
-    projects_root: null,
-    state_location: '',
-    completion_hint: !!snap.completion_hint,
-    ...activeGen,
-  };
-}
-
 function snapshotToPickerRun(snap, provider, remote, workspace) {
   const updatedMs = Date.parse(snap.updated_at || '') || 0;
   const hookGenerating = !!snap.generating && !snap.completion_hint;
@@ -721,6 +791,18 @@ function annotateCodexHeldState(runs) {
   });
 }
 
+// Local codex rollout discovery for the picker (in-flight generation fix). Bounded: the mtime
+// prefilter keeps the scan to rollouts touched within the active-generation stale window (a
+// generating run necessarily has a recent mtime) even though ~/.codex/sessions holds ~1000
+// rollouts. Debounced: the picker polls ~700ms while open, so rapid polls share one scan via the
+// short-TTL memo (a result ~a second stale is fine). Fail-safe: any disk trouble contributes zero
+// discovered rows and never blocks the endpoint, mirroring the ssh discovery fallback.
+const LOCAL_CODEX_DISCOVERY_TTL_MS = 1500;
+const discoverLocalCodexRunsForPicker = wrapShortTtlMemo(
+  () => discoverCodexRuns(undefined, { recentOnlyMs: ACTIVE_GENERATION_STALE_MS }).catch(() => []),
+  LOCAL_CODEX_DISCOVERY_TTL_MS
+);
+
 async function listCodexRunsFromHookStore(project, source) {
   const rolledUp = rollUpSnapshotsForPicker('codex', codexHookStore.listSnapshots());
   const localWorkspaces = (project.cursor_workspaces || [])
@@ -729,7 +811,7 @@ async function listCodexRunsFromHookStore(project, source) {
     .filter(Boolean);
 
   if (source !== 'ssh') {
-    const runs = [];
+    let runs = [];
     const seenKeys = new Set();
     for (const snap of rolledUp) {
       if (!snap) continue;
@@ -745,6 +827,14 @@ async function listCodexRunsFromHookStore(project, source) {
       runs.push(run);
     }
     runs.sort((a, b) => (b.mtime_ms || 0) - (a.mtime_ms || 0));
+    // Discovery merge: codex hook snapshots are in-memory only, so an agent that started generating
+    // while Orchestra was down has no snapshot and would otherwise never appear in the picker.
+    // Merged on EVERY call (not gated on zero rows — snapshots from other local runs must not
+    // re-hide the missed one): discovered rows are filtered to generating-only, workspace-gated
+    // like the snapshot path, and deduped against snapshot rows by transcript_path (the snapshot
+    // row wins).
+    const discovered = await discoverLocalCodexRunsForPicker();
+    runs = mergeLocalCodexDiscoveryPickerRuns(runs, discovered, { localWorkspaces });
     const enriched = await Promise.all(runs.map((run) => enrichCodexPickerRunWithTranscript(run)));
     return { runs: annotateCodexHeldState(enriched), error: null };
   }
@@ -830,6 +920,21 @@ function annotateGeminiHeldState(runs, snapshots) {
   );
 }
 
+// Local agy conversation-DB discovery for the gemini picker (in-flight generation fix).
+// Bounded: the reader's mtime prefilter (sinceMs = the stale window) drops untouched DBs BEFORE
+// any sqlite open, and enumeration caps at 32 newest per dir even though ~/.gemini holds 900+
+// historical conversation DBs. Debounced: the picker polls ~700ms while open, so rapid polls
+// share one scan via the short-TTL memo. Fail-safe: any scan trouble contributes zero discovered
+// rows and never blocks the endpoint (per-DB skips live inside the reader).
+const LOCAL_AGY_DISCOVERY_TTL_MS = 1500;
+const discoverLocalAgyRunsForPicker = wrapShortTtlMemo(
+  () =>
+    discoverLocalAgyRuns({
+      conversationsDirs: [agyCliConversationsDirForStatus(), agyAppConversationsDirForStatus()],
+    }).catch(() => []),
+  LOCAL_AGY_DISCOVERY_TTL_MS
+);
+
 async function listGeminiRunsFromHookStore(project, source, options = {}) {
   const rolledUpSnapshots = rollUpSnapshotsForPicker('gemini', geminiHookStore.listSnapshots());
   const excludeSessionIds = geminiSubAgentSessionIdSet(rolledUpSnapshots);
@@ -845,10 +950,21 @@ async function listGeminiRunsFromHookStore(project, source, options = {}) {
       excludeSessionIds,
     });
     const annotated = annotateGeminiPermissionState(snapshotRuns, rolledUpSnapshots);
-    const runs = annotateGeminiHeldState(
+    const enrichedRuns = annotateGeminiHeldState(
       await enrichGeminiHookPickerRuns(annotated, rolledUpSnapshots),
       rolledUpSnapshots
     );
+    // Discovery merge: hook snapshots are in-memory only, so an agy run that started generating
+    // while Orchestra was down has no snapshot and would otherwise never appear in the picker.
+    // Merged on EVERY call (not gated on zero rows — snapshots from other local runs must not
+    // re-hide the missed one) and AFTER hook/transcript enrichment: discovered rows are already
+    // classified by the DB step-status channel (authoritative for agy), while the transcript
+    // classifier can transiently read a mid-stream agy transcript as idle — hook rows recover
+    // via their snapshot's generating flag, which discovered rows by definition lack. Deduped by
+    // conversationId/transcript (hook row wins) and filtered by the same sub-agent exclusion set
+    // the snapshot path applies.
+    const discovered = await discoverLocalAgyRunsForPicker();
+    const runs = mergeLocalGeminiDiscoveryPickerRuns(enrichedRuns, discovered, { excludeSessionIds });
     return { runs, error: null };
   }
 
@@ -911,6 +1027,34 @@ function annotateClaudeHeldState(runs, snapshots) {
   });
 }
 
+// Local claude transcript discovery for the picker (in-flight generation fix). Bounded: the
+// mtime prefilter keeps the scan to transcripts touched within the active-generation stale
+// window (a generating run necessarily has a recent mtime) even though ~/.claude/projects can
+// hold 1000+ transcripts. Debounced: the picker polls ~700ms while open, so rapid polls share
+// one scan via the short-TTL memo (a result ~a second stale is fine). Fail-safe: any disk
+// trouble contributes zero discovered rows and never blocks the endpoint, mirroring the ssh
+// discovery fallback in listClaudeRunsFromHookStore.
+const LOCAL_CLAUDE_DISCOVERY_TTL_MS = 1500;
+const discoverLocalClaudeRunsForPicker = wrapShortTtlMemo(
+  () =>
+    discoverClaudeRuns(undefined, { recentOnlyMs: ACTIVE_GENERATION_STALE_MS }).catch(() => []),
+  LOCAL_CLAUDE_DISCOVERY_TTL_MS
+);
+
+// Local cursor transcript discovery for the picker (in-flight generation fix). Same shape as the
+// claude memo above: the RAW cross-project scan is bounded (recentOnlyMs stat-prefilter, folding
+// sub-agent child mtimes) and memoized (~700ms picker polls share one scan); per-project workspace
+// gating happens AFTER the memo in mergeLocalCursorDiscoveryPickerRuns. Fail-safe: any disk trouble
+// contributes zero discovered rows and never blocks the endpoint.
+const LOCAL_CURSOR_DISCOVERY_TTL_MS = 1500;
+const discoverLocalCursorRunsForPicker = wrapShortTtlMemo(
+  () =>
+    discoverCursorRunsForPicker(undefined, { recentOnlyMs: ACTIVE_GENERATION_STALE_MS }).catch(
+      () => []
+    ),
+  LOCAL_CURSOR_DISCOVERY_TTL_MS
+);
+
 async function listClaudeRunsFromHookStore(project, source) {
   const snapshots = claudeHookStore.listSnapshots();
   if (source !== 'ssh') {
@@ -918,7 +1062,15 @@ async function listClaudeRunsFromHookStore(project, source) {
       .filter((item) => item && item.source === 'local' && typeof item.workspace_path === 'string')
       .map((item) => item.workspace_path.trim())
       .filter(Boolean);
-    const runs = pickerRunsFromClaudeSnapshots(snapshots, { source: 'local', localWorkspaces });
+    let runs = pickerRunsFromClaudeSnapshots(snapshots, { source: 'local', localWorkspaces });
+    // Discovery merge: hook snapshots are in-memory only, so an agent that started generating
+    // while Orchestra was down has no snapshot and would otherwise never appear in the picker.
+    // Merged on EVERY call (not gated on zero rows — snapshots from other local runs must not
+    // re-hide the missed one): discovered rows are filtered to generating-only, workspace-gated
+    // like the snapshot path, and deduped against snapshot rows by transcript/session (the
+    // snapshot row wins).
+    const discovered = await discoverLocalClaudeRunsForPicker();
+    runs = mergeLocalClaudeDiscoveryPickerRuns(runs, discovered, { localWorkspaces });
     return {
       runs: annotateClaudeHeldState(await enrichClaudeHookPickerRuns(runs, snapshots), snapshots),
       error: null,
@@ -1043,6 +1195,134 @@ function applyTaskStatusChange(task, nextStatus) {
     task.completed_watch_tracking = null;
   } else if (prev === 'done') {
     task.completed_at = null;
+  }
+}
+
+// Human-readable label for the linked chat's provider, stored on the task so the
+// "Provider: Title" section survives after the live watch_tracking is nulled (done).
+function watchTrackingProviderLabel(tracking) {
+  if (!tracking || typeof tracking !== 'object') return '';
+  if (tracking.kind === 'ide_agent') {
+    const p = tracking.provider;
+    if (p === 'claude') return 'Claude Code';
+    if (p === 'claude_cowork') return 'Claude Cowork';
+    if (p === 'gemini' || p === 'gemini_cli') return 'Gemini';
+    if (p === 'codex') return 'Codex';
+    if (p === 'grok') return 'Grok';
+    return 'Agent';
+  }
+  if (tracking.kind === 'cursor') return 'Cursor';
+  if (tracking.kind === 'browser_chat') {
+    const p = String(tracking.provider || '');
+    if (p.includes('chatgpt')) return 'ChatGPT';
+    if (p.includes('claude')) return 'Claude';
+    if (p.includes('gemini')) return 'Gemini';
+    return 'Browser';
+  }
+  return '';
+}
+
+// Which minimalist provider glyph to show before an auto-detected provider label:
+// 'cursor' | 'openai' | 'claude' | 'gemini' | 'grok' | 'process' | '' (none/manual).
+function watchTrackingProviderKind(tracking) {
+  if (!tracking || typeof tracking !== 'object') return '';
+  if (tracking.kind === 'cursor') return 'cursor';
+  if (tracking.kind === 'process') return 'process';
+  if (tracking.kind === 'ide_agent') {
+    const p = tracking.provider;
+    if (p === 'claude' || p === 'claude_cowork') return 'claude';
+    if (p === 'gemini' || p === 'gemini_cli') return 'gemini';
+    if (p === 'codex') return 'openai';
+    if (p === 'grok') return 'grok';
+    return '';
+  }
+  if (tracking.kind === 'browser_chat') {
+    const p = String(tracking.provider || '');
+    if (p.includes('chatgpt')) return 'openai';
+    if (p.includes('claude')) return 'claude';
+    if (p.includes('gemini')) return 'gemini';
+    return '';
+  }
+  return '';
+}
+
+// Which surface an auto-detected coding-agent chat runs on: 'cli' | 'desktop' | 'plugin' | ''.
+// The tracker threads it through the link body onto `tracking.surface`: ide_agent from the
+// transcript (claude `entrypoint` / codex `originator` / agy brain root) and cursor from its
+// `cursor_version` (CalVer → cli, SemVer → the editor 'plugin'). Browser chats have no surface.
+// Drives the leading surface glyph in the UI.
+function watchTrackingSurfaceKind(tracking) {
+  if (!tracking || typeof tracking !== 'object') return '';
+  if (tracking.kind !== 'ide_agent' && tracking.kind !== 'cursor') return '';
+  const s = String(tracking.surface || '').trim().toLowerCase();
+  return s === 'cli' || s === 'desktop' || s === 'plugin' ? s : '';
+}
+
+// Clears the whole title block at once: the bold title, provider, chat title and location.
+function clearTaskTitle(task) {
+  task.title = '';
+  task.manual_title = '';
+  task.title_provider = '';
+  task.provider_kind = '';
+  task.surface_kind = '';
+  task.manual_location = '';
+  task.location_kind = '';
+  task.chat_title = '';
+}
+
+// The single displayed value for each meta section is now the editable field itself, so a
+// linked watcher writes straight into it (provider/title/location). Build a short location
+// string from a watcher: the working-dir leaf, plus the host when it runs over SSH.
+function pathLeaf(value) {
+  const v = String(value || '')
+    .trim()
+    .replace(/[\\/]+$/, '');
+  if (!v) return '';
+  if (v.includes('/')) return v.split('/').filter(Boolean).pop() || '';
+  if (v.includes('\\')) return v.split('\\').filter(Boolean).pop() || '';
+  if (v.includes('-')) return v.split('-').pop() || v; // cursor workspace slug (path → dashes)
+  return v;
+}
+
+function watchTrackingLocationLabel(tracking) {
+  if (!tracking || typeof tracking !== 'object') return '';
+  if (tracking.kind === 'browser_chat') {
+    try {
+      return new URL(String(tracking.url || '')).hostname.replace(/^www\./, '');
+    } catch {
+      return '';
+    }
+  }
+  // Claude Cowork's workspace_path is the sandbox's per-session outputs dir (leaf "outputs"),
+  // not the folder the user picked. Its real "Working folders" live in working_folders — show the
+  // first folder's name (with a +N suffix when several are attached).
+  if (tracking.provider === 'claude_cowork' && Array.isArray(tracking.working_folders)) {
+    const names = tracking.working_folders
+      .map((f) => pathLeaf(String(f || '').trim()))
+      .filter(Boolean);
+    if (names.length) return names.length > 1 ? `${names[0]} +${names.length - 1}` : names[0];
+  }
+  const raw = String(
+    tracking.workspace_path ||
+      tracking.cwd ||
+      (Array.isArray(tracking.workspace_roots) && tracking.workspace_roots[0]) ||
+      (Array.isArray(tracking.workspace_slugs) && tracking.workspace_slugs[0]) ||
+      ''
+  ).trim();
+  const leaf = pathLeaf(raw);
+  const host = tracking.source === 'ssh' ? String(tracking.host || '').trim() : '';
+  if (leaf && host) return `${leaf} · ${host}`;
+  return leaf || host;
+}
+
+// A blocking task was completed/deleted: release every task that was "stuck" on it.
+function clearBlockersReferencing(project, taskId) {
+  if (!project || !taskId || !Array.isArray(project.tasks)) return;
+  for (const t of project.tasks) {
+    if (t && t.blocking_task_id === taskId) {
+      t.blocking_task_id = null;
+      t.stuck = false;
+    }
   }
 }
 
@@ -1248,6 +1528,27 @@ function normalizeTaskShape(task) {
   if (task.paused_watch_tracking === undefined) task.paused_watch_tracking = null;
   if (task.is_task_backlog === undefined) task.is_task_backlog = false;
   task.is_task_backlog = !!task.is_task_backlog;
+  // Custom-UI task fields (title section + stuck/blocking links).
+  if (task.title === undefined) task.title = '';
+  // manual_title is now the user's own bold task title (a watcher never overwrites it).
+  if (task.manual_title === undefined) task.manual_title = '';
+  if (task.title_provider === undefined) task.title_provider = '';
+  // Brand glyph for an auto-detected provider ('cursor'/'openai'/'claude'/'gemini'/'process'/'').
+  if (task.provider_kind === undefined) task.provider_kind = '';
+  if (task.surface_kind === undefined) task.surface_kind = '';
+  if (task.manual_location === undefined) task.manual_location = '';
+  // How the location was set: 'folder' (auto from a coding agent), 'browser' (auto from a web
+  // chat), or '' (manual / none) — drives the little glyph shown before the location.
+  if (task.location_kind === undefined) task.location_kind = '';
+  // chat_title is the agent's conversation name, auto-filled by a watcher. Migrate any
+  // pre-existing auto title into it once (runs a single time — after this it is always defined).
+  if (task.chat_title === undefined) task.chat_title = task.title || '';
+  if (task.stuck === undefined) task.stuck = false;
+  task.stuck = !!task.stuck;
+  if (task.blocking_task_id === undefined) task.blocking_task_id = null;
+  // context_note is the user's own freeform "where I left off" note (markdown), written for
+  // themselves to re-orient when switching back to a task. A watcher never touches it.
+  if (task.context_note === undefined) task.context_note = '';
   task.watch_tracking = normalizeWatchTracking(task.watch_tracking, task.cursor_tracking);
   task.paused_watch_tracking = normalizeWatchTracking(task.paused_watch_tracking, null);
   task.cursor_tracking =
@@ -2166,6 +2467,13 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
         ? String(process.env.BROWSER_CHAT_TOKEN).trim()
         : undefined,
   });
+  // FollowUps §3.3 browser assistant-text adapter. Registered here (not in the module-level adapter
+  // block) because it needs browserChatStore, which is created in this scope; liveFeedTailAdapters is
+  // held by reference and iterated each poll, so a late push takes effect immediately. No-ops for any
+  // watch that isn't a stream-opted-in browser_chat; env off-switch ORCHESTRA_LIVEFEED_BROWSER_STREAM=0.
+  liveFeedTailAdapters.push(
+    createBrowserStreamAdapter({ ring: liveFeedService.ring, store: browserChatStore })
+  );
   app.use(express.json({ limit: '1mb' }));
   // API routes must be registered before express.static so paths like /api/cursor/runs
   // are never mistaken for static files (which would return HTML and break JSON clients).
@@ -2198,9 +2506,41 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     const project = findProject(req.params.id);
     if (!project) return res.status(404).json({ error: 'Project not found' });
     try {
-      const runs = cursorHookStore.listRunsForProject(project, {
+      let runs = cursorHookStore.listRunsForProject(project, {
         activeOnly: parseBool(req.query.active_only),
       });
+      // Discovery merge (in-flight generation fix): hook snapshots are in-memory only, so a cursor
+      // agent that started while Orchestra was down has no snapshot and would never appear. Merge
+      // disk-discovered generating runs on EVERY call (hook row always wins), workspace-gated to the
+      // project's local cursor workspaces exactly like the snapshot path.
+      const localWorkspaces = (project.cursor_workspaces || [])
+        .filter((item) => item && item.source === 'local' && typeof item.workspace_path === 'string')
+        .map((item) => item.workspace_path.trim())
+        .filter(Boolean);
+      const discovered = await discoverLocalCursorRunsForPicker();
+      runs = mergeLocalCursorDiscoveryPickerRuns(runs, discovered, { localWorkspaces });
+      // On-demand: attach the human chat title (Cursor's meta.name). Local reads the chat store.db
+      // directly; ssh (cursor-agent headless) reads the remote store.db meta.name over ssh. Runs the
+      // discovery merge first so freshly-discovered in-flight runs get a title too.
+      for (const run of runs) {
+        if (!run || run.title || !run.conversation_id) continue;
+        try {
+          if (run.source === 'ssh') {
+            if (run.host) {
+              run.title = await remoteChatNameForConversation({
+                host: run.host,
+                conversationId: run.conversation_id,
+                runSsh: createSshRunner(),
+                timeoutMs: 4000,
+              });
+            }
+          } else {
+            run.title = chatNameForConversation(run.conversation_id) || '';
+          }
+        } catch {
+          run.title = run.title || '';
+        }
+      }
       res.json({ runs });
     } catch (err) {
       console.error('[server] /api/projects/:id/cursor-runs:', err);
@@ -2217,12 +2557,16 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
       provider !== 'codex' &&
       provider !== 'claude' &&
       provider !== 'claude_cowork' &&
-      provider !== 'gemini'
+      provider !== 'gemini' &&
+      provider !== 'grok'
     ) {
-      return res.status(400).json({ error: 'provider must be codex, claude, claude_cowork, or gemini' });
+      return res.status(400).json({ error: 'provider must be codex, claude, claude_cowork, gemini, or grok' });
     }
     if (provider === 'claude_cowork' && source === 'ssh') {
       return res.status(400).json({ error: 'Claude Cowork watching is local only' });
+    }
+    if (provider === 'grok' && source === 'ssh') {
+      return res.status(400).json({ error: 'Grok watching is local only — remote grok runs are driven/captured over ssh by the harness (R2d), but serving a REMOTE session_dir needs the remote-read watch plumbing (docs/TestingFrameworkUpdate/FinalSteps/LiveFeed/grok/RemoteWatchFollowUp.MD)' });
     }
     try {
       let runs;
@@ -2249,6 +2593,8 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
           return res.status(400).json({ error: geminiResult.error });
         }
         runs = geminiResult.runs;
+      } else if (provider === 'grok') {
+        runs = await discoverGrokRuns();
       } else {
         if (provider === 'claude_cowork') runs = await discoverClaudeCoworkRuns();
       }
@@ -2262,6 +2608,37 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     } catch (err) {
       console.error('[server] /api/projects/:id/ide-agent-runs:', err);
       res.status(500).json({ error: err.message || 'Failed to list ide agent runs' });
+    }
+  });
+
+  // Live feed (Lane C §0 probe contract, Phase 2a): normalized per-turn LiveTurnEvents for every
+  // tracked task in the project, with a per-task delta cursor. Read-only GET (same auth allowance
+  // as /api/state), additive-only — plain mode never calls it and /api/state is untouched. Pure
+  // function of in-memory state (raw hook tap → per-task ring); a failed per-task fill degrades
+  // that task, never the response (fail-safe rule, Lane C §5).
+  //   GET /api/projects/:id/live-feed?since=<urlencoded JSON {taskId: headSeq}>&tasks=<id,id,...>
+  app.get('/api/projects/:id/live-feed', (req, res) => {
+    const project = findProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    let sinceMap = {};
+    if (typeof req.query.since === 'string' && req.query.since.trim()) {
+      try {
+        const parsed = JSON.parse(req.query.since);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) sinceMap = parsed;
+      } catch {
+        sinceMap = {}; // an unreadable cursor degrades to a full snapshot, never a 4xx/5xx
+      }
+    }
+    const taskIds =
+      typeof req.query.tasks === 'string' && req.query.tasks.trim()
+        ? req.query.tasks.split(',').map((s) => s.trim()).filter(Boolean)
+        : null;
+    try {
+      res.json(liveFeedService.buildProjectFeed(project, { sinceMap, taskIds }));
+    } catch (err) {
+      console.error('[server] /api/projects/:id/live-feed:', err);
+      // Fail safe even at the top level: an empty feed beats a 500 (the task list must render).
+      res.json({ now: Date.now(), tasks: [] });
     }
   });
 
@@ -2565,6 +2942,27 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     return res.json({ ok: true, completed, resumed, snapshot: result.snapshot });
   });
 
+  // ---------------------------------------------------------------- terminal capture (§3.1)
+  // A companion producer (Cursor shell-integration extension; Terminal.app/iTerm2 pollers; the
+  // file-redirect fallback) streams command lifecycle + output here. Token-gated; the adapter
+  // buffers events by terminal_id and the live-feed pump drains a matched buffer into the task's
+  // ring (see lib/live_terminal_adapter.js). No storage write — the buffer is ephemeral.
+  app.get('/api/terminal/config', (req, res) => {
+    const host = req.get('host') || `${HOST}:${DEFAULT_PORT}`;
+    res.json({ token: terminalTailAdapter.getToken(), apiBase: `http://${host}` });
+  });
+
+  app.post('/api/terminal/event', (req, res) => {
+    if (!terminalTailAdapter.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing terminal token' });
+    }
+    const result = terminalTailAdapter.ingest(req.body || {});
+    if (!result || !result.ok) {
+      return res.status(400).json({ error: (result && result.error) || 'Invalid terminal event' });
+    }
+    return res.json({ ok: true });
+  });
+
   app.get('/api/claude-hooks/config', (req, res) => {
     const host = req.get('host') || `${HOST}:${DEFAULT_PORT}`;
     res.json({
@@ -2671,6 +3069,14 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
       return res.status(401).json({ error: 'Invalid or missing claude hook token' });
     }
     const body = req.body || {};
+    // grok 0.2.93 vendor-compat bug: grok runs the user's ~/.claude/settings.json forwarder from
+    // grok sessions (ReconPlaybook §7), and normalizeEventName reads the camelCase hookEventName
+    // key — a grok `stop`/`user_prompt_submit` would parse as a real claude Stop/UserPromptSubmit.
+    // Classify + drop BEFORE the raw tap and the store so grok posts never ingest as claude state.
+    if (isGrokOriginHookBody(body)) {
+      logGrokOriginOnce('claude-hooks', body);
+      return res.json({ ok: true, ignored: 'grok-origin' });
+    }
     hookEventLog.push('claude', body);
     const result = claudeHookStore.ingestEvent(body);
     if (!result.ok) return res.status(400).json({ error: result.error });
@@ -2907,6 +3313,14 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
   }
   function applyClaudeHookCompletion(getState, onEachTask, snapshot) {
     if (!snapshot || !snapshot.completion_hint) return 0;
+    // Only an IDLE Stop clears immediately on hook ingest. A BUSY Stop — one that leaves a
+    // background sub-agent running (completion_subagent_pending), a background shell task, or
+    // pending crons — must defer to the watch poll, which owns the tiered hold
+    // (getCompletionHintForTracking skips a running sub-agent; isStopDebouncePending debounces
+    // shells/crons). Without this guard the push path here fires the instant the parent Stops and
+    // flips the watch to done ~0.5s later, even though a backgrounded sub-agent is still working —
+    // then it bounces back on the sub-agent's task-notification. (Mirrors codex's holdDoneForSubagents.)
+    if (!snapshot.completion_idle) return 0;
     let completedCount = 0;
     const targetTranscript = typeof snapshot.transcript_path === 'string' ? snapshot.transcript_path : '';
     const targetSessionId = normalizeSessionId(snapshot.session_id);
@@ -2922,8 +3336,12 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
         if (!transcriptMatch && !sessionMatch) continue;
         // Permission/AskUserQuestion stops carry a permission attention reason; plain
         // Stop does not. Tag the watcher so it flips to "needs input" vs "done".
+        // claudeGateKindFromHint splits question vs permission by the gated tool name — this
+        // push path fires FIRST (at PermissionRequest ingest, before the watch poll ever runs),
+        // so hardcoding 'permission' here latched the wrong kind for AskUserQuestion and
+        // /api/state watch_finished.gate_kind disagreed with the feed (findings1 F2).
         if (isPermissionAttentionReason(snapshot.attention_reason)) {
-          markHumanGateWatchClear(wt, 'permission', snapshot, nowIso());
+          markHumanGateWatchClear(wt, claudeGateKindFromHint(snapshot), snapshot, nowIso());
         }
         onEachTask(task);
         completedCount += 1;
@@ -3242,6 +3660,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
                 last_error: null,
               };
           if (conversation_id) tracking.conversation_id = conversation_id;
+          tracking.surface = typeof body.surface === 'string' ? body.surface : '';
           attachCursorWatchWorkspaceSlugs(project, tracking, source);
           await resolveCursorWatchTranscriptOnLink(tracking, source);
         } else {
@@ -3251,6 +3670,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
           }
           const runId = resolved ? path.basename(resolved, '.jsonl') : conversation_id;
           tracking = cursorToWatchTracking(runId, resolved || '');
+          tracking.surface = typeof body.surface === 'string' ? body.surface : '';
           if (conversation_id) {
             tracking.conversation_id = conversation_id;
           }
@@ -3285,26 +3705,31 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
           return res.status(400).json({ error: 'Invalid browser chat watch data' });
         }
       } else if (kind === 'ide_agent') {
-        const provider = ['claude', 'claude_cowork', 'codex', 'gemini'].includes(body.provider)
+        const provider = ['claude', 'claude_cowork', 'codex', 'gemini', 'grok'].includes(body.provider)
           ? body.provider
           : '';
         if (!provider) {
           return res
             .status(400)
-            .json({ error: 'provider must be "codex", "claude", "claude_cowork", or "gemini"' });
+            .json({ error: 'provider must be "codex", "claude", "claude_cowork", "gemini", or "grok"' });
         }
         const ideSource = body.source === 'ssh' ? 'ssh' : 'local';
         if (provider === 'claude_cowork' && ideSource === 'ssh') {
           return res.status(400).json({ error: 'Claude Cowork watching is local only' });
         }
+        if (provider === 'grok' && ideSource === 'ssh') {
+          return res.status(400).json({ error: 'Grok watching is local only — remote grok runs are driven/captured over ssh by the harness (R2d), but serving a REMOTE session_dir needs the remote-read watch plumbing (docs/TestingFrameworkUpdate/FinalSteps/LiveFeed/grok/RemoteWatchFollowUp.MD)' });
+        }
         const sessionId = normalizeSessionId(body.session_id);
         const transcript_path_raw = typeof body.transcript_path === 'string' ? body.transcript_path.trim() : '';
         const audit_path_raw = typeof body.audit_path === 'string' ? body.audit_path.trim() : '';
-        if (!sessionId && !transcript_path_raw && !audit_path_raw) {
-          return res.status(400).json({ error: 'session_id, transcript_path, or audit_path is required for ide_agent watch' });
+        const session_dir_raw = typeof body.session_dir === 'string' ? body.session_dir.trim() : '';
+        if (!sessionId && !transcript_path_raw && !audit_path_raw && !session_dir_raw) {
+          return res.status(400).json({ error: 'session_id, transcript_path, audit_path, or session_dir is required for ide_agent watch' });
         }
         let transcriptPath = '';
         let auditPath = '';
+        let grokSessionDir = '';
         let remote = null;
         if (ideSource === 'ssh') {
           remote = resolveSshWatchRemote(project, body);
@@ -3330,6 +3755,19 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
             return res.status(400).json({ error: 'Audit file does not exist' });
           }
         }
+        if (provider === 'grok') {
+          // The session DIR is the grok binding (events.jsonl + summary.json + updates.jsonl live
+          // inside it). Accept an explicit session_dir (picker candidates carry it) or resolve one
+          // from the bare session id by scanning the two-level ~/.grok/sessions tree.
+          const resolvedDir = session_dir_raw || resolveGrokSessionDirById(sessionId);
+          if (!resolvedDir) {
+            return res.status(400).json({ error: 'Grok watch requires session_dir (or a session_id resolvable under the grok sessions root)' });
+          }
+          grokSessionDir = assertAllowedGrokSessionDir(resolvedDir);
+          if (!fs.existsSync(grokSessionDir)) {
+            return res.status(400).json({ error: 'Grok session dir does not exist' });
+          }
+        }
         tracking = {
           kind: 'ide_agent',
           provider,
@@ -3344,11 +3782,22 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
                 : body.state_location === 'log'
                   ? 'log'
                   : '',
-          session_id: sessionId || (auditPath ? path.basename(path.dirname(auditPath)) : path.basename(transcriptPath, '.jsonl')),
+          session_id:
+            sessionId ||
+            (grokSessionDir
+              ? path.basename(grokSessionDir)
+              : auditPath
+                ? path.basename(path.dirname(auditPath))
+                : path.basename(transcriptPath, '.jsonl')),
           transcript_path: transcriptPath,
           audit_path: auditPath,
+          session_dir: grokSessionDir,
           title: typeof body.title === 'string' ? body.title : '',
+          surface: typeof body.surface === 'string' ? body.surface : '',
           workspace_path: typeof body.workspace_path === 'string' ? body.workspace_path : '',
+          working_folders: Array.isArray(body.working_folders)
+            ? body.working_folders.filter((f) => typeof f === 'string' && f.trim())
+            : [],
           last_user_preview: typeof body.last_user_preview === 'string' ? body.last_user_preview : '',
           log_path: typeof body.log_path === 'string' ? body.log_path : '',
           log_request_id: typeof body.log_request_id === 'string' ? body.log_request_id : '',
@@ -3388,6 +3837,43 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     applyTaskStatusChange(task, 'waiting');
     task.watch_tracking = tracking;
     task.cursor_tracking = tracking.kind === 'cursor' ? tracking : null;
+    // Persist the linked chat's title + provider at the task level so the title
+    // section survives the done badge (watch_tracking gets nulled on completion).
+    let linkedTitle = typeof tracking.title === 'string' ? tracking.title.trim() : '';
+    if (!linkedTitle && tracking.kind === 'cursor') {
+      try {
+        if (tracking.source === 'ssh') {
+          linkedTitle = tracking.host
+            ? await remoteChatNameForConversation({
+                host: tracking.host,
+                conversationId: tracking.conversation_id || tracking.run_id || '',
+                runSsh: createSshRunner(),
+                timeoutMs: 4000,
+              })
+            : '';
+        } else {
+          linkedTitle = chatNameForConversation(tracking.conversation_id || tracking.run_id || '') || '';
+        }
+      } catch {
+        linkedTitle = '';
+      }
+      if (linkedTitle) tracking.title = linkedTitle;
+    }
+    // Auto-populate the meta sections the watcher can fill (overwriting what was there):
+    // provider always, the chat/page title when the watcher has one, and the location. The
+    // user's own bold title (manual_title) is left untouched.
+    if (linkedTitle) {
+      task.title = linkedTitle;
+      task.chat_title = linkedTitle;
+    }
+    task.title_provider = watchTrackingProviderLabel(tracking);
+    task.provider_kind = watchTrackingProviderKind(tracking);
+    task.surface_kind = watchTrackingSurfaceKind(tracking);
+    const linkedLocation = watchTrackingLocationLabel(tracking);
+    if (linkedLocation) {
+      task.manual_location = linkedLocation;
+      task.location_kind = tracking.kind === 'browser_chat' ? 'browser' : 'folder';
+    }
     if (
       tracking.kind === 'ide_agent' &&
       (tracking.provider === 'gemini' || tracking.provider === 'gemini_cli')
@@ -3479,6 +3965,28 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
   // markers — same staleness fix as probe-logs/clear. Unauthenticated like the other dev-only clears.
   app.post('/api/browser-chats/stream-signals/clear', (req, res) => {
     browserChatStore.clearStreamSignals();
+    res.json({ ok: true });
+  });
+
+  // Assistant-TEXT stream (FollowUps §3.3 — explicit privacy opt-in). UNLIKE /stream-signal, this
+  // endpoint carries the model's message content. The extension only posts here under the separate
+  // body-streaming opt-in (default OFF). We keep ONE current message per conversation; the live-feed
+  // browser stream adapter renders it as a single evolving note + a final stop. Display-only — it
+  // never feeds completion/attribution (those still ride /snapshot, /stream-signal, /complete).
+  app.post('/api/browser-chats/stream-body', (req, res) => {
+    if (!browserChatStore.verifyToken(req)) {
+      return res.status(401).json({ error: 'Invalid or missing browser chat token' });
+    }
+    const result = browserChatStore.ingestStreamBody(req.body || {});
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    // Flag the linked task's watch_tracking as opted-in so the live feed bumps its tier above T0
+    // (liveTierForWatch keys on wt.stream_optin — the browser analog of cowork's audit_path).
+    const marked = markBrowserChatStreamOptin(
+      () => storage.getState(),
+      result.body.provider,
+      result.body.conversation_id
+    );
+    if (marked > 0) storage.save();
     res.json({ ok: true });
   });
 
@@ -3785,6 +4293,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     if (!task) return res.status(404).json({ error: 'Task not found' });
     task.watch_tracking = null;
     task.cursor_tracking = null;
+    // Provider / chat title / location stay on the task so the meta line survives an unlink.
     storage.save();
     res.json(task);
   });
@@ -3809,6 +4318,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     if (!task) return res.status(404).json({ error: 'Task not found' });
     task.watch_finished = null;
     task.paused_watch_tracking = null;
+    // Keep provider / chat title / location so dismissing the "done" badge doesn't wipe the meta.
     storage.save();
     res.json(task);
   });
@@ -3991,32 +4501,56 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
   app.post('/api/projects/:id/tasks', (req, res) => {
     const project = findProject(req.params.id);
     if (!project) return res.status(404).json({ error: 'Project not found' });
-    const { 
-      text, 
-      is_agent, 
+    const {
+      text,
+      is_agent,
       is_task_backlog,
       id,
       status,
       waiting_since,
       watch_tracking,
       cursor_tracking,
+      manual_title,
+      title_provider,
+      chat_title,
+      manual_location,
+      context_note,
       order,
       created_at,
       completed_at,
-      insert_at_index
+      insert_at_index,
+      allow_blank
     } = req.body || {};
-    if (!text || typeof text !== 'string' || !text.trim()) {
+    const trimmedText = typeof text === 'string' ? text.trim() : '';
+    const trimmedManualTitle = typeof manual_title === 'string' ? manual_title.trim() : '';
+    const trimmedProvider = typeof title_provider === 'string' ? title_provider.trim() : '';
+    const trimmedChatTitle = typeof chat_title === 'string' ? chat_title.trim() : '';
+    const trimmedLocation = typeof manual_location === 'string' ? manual_location.trim() : '';
+    // A task normally needs text, but a title-only task (e.g. from a "#TITLE Provider : Title"
+    // directive with nothing under it) is allowed when a title or provider is supplied.
+    if (!trimmedText && !trimmedManualTitle && !trimmedProvider && !trimmedChatTitle && !allow_blank) {
       return res.status(400).json({ error: 'text is required' });
     }
     const task = {
       id: id || taskId(),
-      text: text.trim(),
+      text: trimmedText,
       status: status || 'todo',
       is_agent: !!is_agent,
       is_task_backlog: !!is_task_backlog,
       waiting_since: waiting_since !== undefined ? waiting_since : null,
       watch_tracking: watch_tracking !== undefined ? watch_tracking : null,
       cursor_tracking: cursor_tracking !== undefined ? cursor_tracking : null,
+      title: '',
+      manual_title: trimmedManualTitle,
+      title_provider: trimmedProvider,
+      provider_kind: '',
+      surface_kind: '',
+      chat_title: trimmedChatTitle,
+      manual_location: trimmedLocation,
+      location_kind: '',
+      stuck: false,
+      blocking_task_id: null,
+      context_note: typeof context_note === 'string' ? context_note : '',
       focus_items: [],
       focus_commands: [],
       order: typeof order === 'number' ? order : project.tasks.length,
@@ -4046,18 +4580,41 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const task = findTask(project, req.params.taskId);
     if (!task) return res.status(404).json({ error: 'Task not found' });
-    const { text, status, is_agent, is_task_backlog } = req.body || {};
+    const {
+      text,
+      status,
+      is_agent,
+      is_task_backlog,
+      manual_title,
+      title_provider,
+      provider_kind,
+      surface_kind,
+      manual_location,
+      chat_title,
+      context_note,
+      stuck,
+      blocking_task_id,
+      clear_title,
+    } = req.body || {};
     if (text !== undefined) {
-      if (typeof text !== 'string' || !text.trim()) {
+      const trimmed = typeof text === 'string' ? text.trim() : '';
+      // Allow an empty body when the task keeps a title or provider (title-only task).
+      const willHaveTitleMeta =
+        !clear_title &&
+        ((title_provider !== undefined ? String(title_provider).trim() : task.title_provider) ||
+          (manual_title !== undefined ? String(manual_title).trim() : task.manual_title) ||
+          task.title);
+      if (!trimmed && !willHaveTitleMeta) {
         return res.status(400).json({ error: 'text must be a non-empty string' });
       }
-      task.text = text.trim();
+      task.text = trimmed;
     }
     if (status !== undefined) {
       if (!VALID_STATUSES.has(status)) {
         return res.status(400).json({ error: `status must be one of ${[...VALID_STATUSES].join(', ')}` });
       }
       applyTaskStatusChange(task, status);
+      if (status === 'done') clearBlockersReferencing(project, task.id);
     }
     if (is_agent !== undefined) {
       task.is_agent = !!is_agent;
@@ -4065,6 +4622,50 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     if (is_task_backlog !== undefined) {
       task.is_task_backlog = !!is_task_backlog;
     }
+    if (manual_title !== undefined) {
+      task.manual_title = typeof manual_title === 'string' ? manual_title.trim() : '';
+    }
+    // Manual "Add Header" provider. A watcher later overwrites this (see watch-link handler). A
+    // manual edit clears the auto-detected kind so the brand glyph only shows for watcher-set ones
+    // UNLESS the client sends explicit kinds (the "Add Header" modal derives a brand glyph from the
+    // provider name and a surface glyph from the chosen platform).
+    if (title_provider !== undefined) {
+      task.title_provider = typeof title_provider === 'string' ? title_provider.trim() : '';
+      if (provider_kind === undefined) task.provider_kind = '';
+      if (surface_kind === undefined) task.surface_kind = '';
+    }
+    if (provider_kind !== undefined) {
+      const pk = typeof provider_kind === 'string' ? provider_kind.trim() : '';
+      task.provider_kind = ['claude', 'openai', 'cursor', 'gemini', 'grok', 'process'].includes(pk) ? pk : '';
+    }
+    if (surface_kind !== undefined) {
+      const sk = typeof surface_kind === 'string' ? surface_kind.trim() : '';
+      task.surface_kind = ['cli', 'desktop', 'plugin'].includes(sk) ? sk : '';
+    }
+    // Location section — same single-field model; a watcher overwrites it on link. A manual edit
+    // clears the auto-detected kind so the folder/globe glyph only shows for watcher-set locations.
+    if (manual_location !== undefined) {
+      task.manual_location = typeof manual_location === 'string' ? manual_location.trim() : '';
+      task.location_kind = '';
+    }
+    // Chat title — the agent's conversation name; a watcher overwrites it on link.
+    if (chat_title !== undefined) {
+      task.chat_title = typeof chat_title === 'string' ? chat_title.trim() : '';
+    }
+    // Context note — the user's own markdown re-orientation note. Keep whitespace/newlines intact
+    // (no trim) so the markdown is preserved exactly as written.
+    if (context_note !== undefined) {
+      task.context_note = typeof context_note === 'string' ? context_note : '';
+    }
+    if (stuck !== undefined) {
+      task.stuck = !!stuck;
+      if (!task.stuck) task.blocking_task_id = null;
+    }
+    if (blocking_task_id !== undefined) {
+      task.blocking_task_id = blocking_task_id || null;
+      if (task.blocking_task_id) task.stuck = true;
+    }
+    if (clear_title) clearTaskTitle(task);
     if (hasOwn(req.body || {}, 'focus_items') || hasOwn(req.body || {}, 'focus_commands')) {
       try {
         setTaskFocusState(task, parseFocusPayload(req.body || {}));
@@ -4082,6 +4683,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     const idx = project.tasks.findIndex((t) => t.id === req.params.taskId);
     if (idx === -1) return res.status(404).json({ error: 'Task not found' });
     project.tasks.splice(idx, 1);
+    clearBlockersReferencing(project, req.params.taskId);
     renumber(project.tasks);
     storage.save();
     res.json({ ok: true });
@@ -4115,7 +4717,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     if (project.workspace_commands.length === 0) {
       return res.json({ ok: false, error: 'No workspace launch target set' });
     }
-    const result = await runFocusCommands(project.workspace_commands);
+    const result = await runFocusCommands(normalizeTaskFocusCommandsForRun(project.workspace_commands));
     res.json(result);
   });
 
@@ -4128,7 +4730,9 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     if (task.focus_commands.length === 0) {
       return res.json({ ok: false, error: 'No task focus target set' });
     }
-    const result = await runFocusCommands(normalizeTaskFocusCommandsForRun(task.focus_commands));
+    const commands = normalizeTaskFocusCommandsForRun(task.focus_commands);
+    const timeoutMs = undefined;
+    const result = await runFocusCommands(commands, { timeoutMs });
     res.json(result);
   });
 
@@ -4139,7 +4743,7 @@ function buildApp(port = DEFAULT_PORT, options = {}) {
     if (project.workspace_commands.length === 0) {
       return res.json({ ok: false, error: 'No workspace launch target set' });
     }
-    const result = await runFocusCommands(project.workspace_commands);
+    const result = await runFocusCommands(normalizeTaskFocusCommandsForRun(project.workspace_commands));
     res.json(result);
   });
 
@@ -4415,10 +5019,15 @@ async function main() {
       // active LOCAL cursor watches and let the probe emit permission_requested/_cleared through the
       // shared renderer apply path. IDE/ssh watches are no-ops in the probe (no local chats/ store.db).
       const cursorCliWatches = [];
-      for (const task of storage.getState().tasks || []) {
-        const wt = task.watch_tracking || task.cursor_tracking || task.paused_watch_tracking || null;
-        if (wt && wt.kind === 'cursor' && wt.source !== 'ssh' && (wt.conversation_id || wt.conversationId)) {
-          cursorCliWatches.push(wt);
+      // Tasks live under projects[].tasks — there is NO top-level state.tasks. The old
+      // `getState().tasks || []` here always iterated [], so this probe was NEVER polled and local
+      // cursor-cli permission gates never flipped needs_input (Phase-5 cursor-cli findings2 §1.3).
+      for (const project of storage.getState().projects || []) {
+        for (const task of project.tasks || []) {
+          const wt = task.watch_tracking || task.cursor_tracking || task.paused_watch_tracking || null;
+          if (wt && wt.kind === 'cursor' && wt.source !== 'ssh' && (wt.conversation_id || wt.conversationId)) {
+            cursorCliWatches.push(wt);
+          }
         }
       }
       if (cursorCliWatches.length) {
@@ -4437,14 +5046,18 @@ async function main() {
       // probe's findStoreDbPath (which only receives the conversation id).
       const sshCursorWatches = [];
       sshCursorCliWatchHostByConv.clear();
-      for (const task of storage.getState().tasks || []) {
-        const wt = task.watch_tracking || task.cursor_tracking || task.paused_watch_tracking || null;
-        if (!wt || wt.kind !== 'cursor' || wt.source !== 'ssh') continue;
-        const conv = String(wt.conversation_id || wt.conversationId || '').trim();
-        const host = String(wt.host || wt.remote_host || '').trim();
-        if (!conv || !host) continue;
-        sshCursorCliWatchHostByConv.set(conv, host);
-        sshCursorWatches.push(wt);
+      // Same projects[].tasks gather as the local block above (same getState().tasks bug — ssh
+      // cursor-cli permission gates were never polled either; Phase-5 cursor-cli findings2 §1.3).
+      for (const project of storage.getState().projects || []) {
+        for (const task of project.tasks || []) {
+          const wt = task.watch_tracking || task.cursor_tracking || task.paused_watch_tracking || null;
+          if (!wt || wt.kind !== 'cursor' || wt.source !== 'ssh') continue;
+          const conv = String(wt.conversation_id || wt.conversationId || '').trim();
+          const host = String(wt.host || wt.remote_host || '').trim();
+          if (!conv || !host) continue;
+          sshCursorCliWatchHostByConv.set(conv, host);
+          sshCursorWatches.push(wt);
+        }
       }
       if (sshCursorWatches.length) {
         const sshStoreDbEvents = await sshCursorCliStoreDbPermissionProbe.pollOnce(sshCursorWatches);
@@ -4775,8 +5388,14 @@ async function main() {
       return cursorCliPermissionTracker.isPending(conv);
     },
     // cursor question gate via the chat store.db (lib/cursor_chat_db.js). Returns true while the
-    // conversation head is a pending AskQuestion asked AFTER linked_at — the sole question-open
-    // signal for cursor-cli (the transcript AskQuestion row is delayed until after the answer).
+    // conversation head is a pending AskQuestion asked at/after the linked_at FLOOR — the sole
+    // question-open signal for cursor-cli (the transcript AskQuestion row is delayed until after the
+    // answer). The floor is linked_at minus an identity-binding grace (cursorQuestionHintSinceMs):
+    // a fast in-turn question asked during the ~26s spawn→watch-link delay would otherwise be
+    // suppressed forever (the live-verified reason cursor question gates never flipped needs_input —
+    // LiveTestHarness.md). A still-pending head is always a real unanswered question, so widening the
+    // floor is safe (see cursor_live_question_adapter.js). This flips the pill to `question` via the
+    // existing markHumanGateWatchClear(wt,'question') path (watch_tracker.js) → reportedGateKind.
     // Local runs read the local store.db synchronously; ssh runs read the REMOTE store.db over ssh via
     // a background-refreshed cache (the hint is sync, so a cold miss returns false and the next poll
     // picks up the cached pending state) — cursor-cli runs the agent headless on the remote.
@@ -4784,7 +5403,7 @@ async function main() {
       if (!cursorTracking) return false;
       const conv = cursorTracking.conversation_id || cursorTracking.run_id || '';
       if (!conv) return false;
-      const sinceMs = Date.parse(cursorTracking.linked_at || '') || 0;
+      const sinceMs = cursorQuestionHintSinceMs(cursorTracking.linked_at);
       if (cursorTracking.source === 'ssh') {
         const host = cursorTracking.host || cursorTracking.remote_host || '';
         if (!host) return false;
@@ -4935,6 +5554,10 @@ async function main() {
     },
     shouldResumeClaudeCoworkWatch: (ideTracking) =>
       coworkWatchActiveGenerationSince(ideTracking.audit_path || ideTracking.transcript_path),
+    // grok resume + done→working re-arm: active-generation classification of the session's LIVE
+    // events.jsonl (lib/grok_session_tracker) — the same shape as cowork's audit classifier.
+    shouldResumeGrokWatch: (ideTracking) =>
+      ideTracking.session_dir ? grokWatchActiveGenerationSince(ideTracking.session_dir) : null,
     onIdeAgentWatchComplete: (ideTracking) => {
       // Synthesize a Stop event so the hook store snapshot is marked done even if the
       // remote Stop hook POST never arrived (e.g. curl --max-time 1 timed out on cancel).
@@ -4989,6 +5612,10 @@ async function main() {
     },
     shouldCompleteClaudeCoworkWatch: (ideTracking) =>
       coworkTurnCompletedSince(ideTracking.audit_path || ideTracking.transcript_path, ideTracking.linked_at),
+    // grok status flips ride the LIVE events.jsonl: '' keep waiting · 'permission'/'question' =
+    // needs-input with the honest gate kind · 'cancelled' · 'done' (see grok_session_tracker).
+    shouldCompleteGrokWatch: (ideTracking) =>
+      ideTracking.session_dir ? grokTurnCompletedSince(ideTracking.session_dir, ideTracking.linked_at) : false,
   });
   poller.start();
   // Non-overlapping: a slow pass (ssh contention, big remote logs) must SLOW polling, not stack a
@@ -5011,6 +5638,21 @@ async function main() {
     console.log(`[server] Orchestra listening on http://${HOST}:${port}`);
   });
 
+  // Tear down reverse SSH tunnels so their ssh child processes don't outlive
+  // the server and leave the remote port bound (which blocks the next
+  // dev-start from opening its own tunnel). Idempotent so the async shutdown
+  // path and the synchronous 'exit' handler below can both call it safely.
+  let tunnelsStopped = false;
+  const stopTunnels = () => {
+    if (tunnelsStopped) return;
+    tunnelsStopped = true;
+    try {
+      remoteHookTunnelManager.stopAll();
+    } catch (err) {
+      console.error('[server] tunnel cleanup failed:', err);
+    }
+  };
+
   const shutdown = async (signal) => {
     console.log(`[server] received ${signal}, shutting down`);
     try {
@@ -5018,12 +5660,18 @@ async function main() {
     } catch (err) {
       console.error('[server] flush failed:', err);
     }
-    remoteHookTunnelManager.stopAll();
+    stopTunnels();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 2000).unref();
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // SIGHUP fires when the controlling terminal closes; without this the server
+  // would exit without running shutdown and orphan its ssh tunnels.
+  process.on('SIGHUP', () => shutdown('SIGHUP'));
+  // Last-resort synchronous cleanup: runs on any exit that isn't SIGKILL,
+  // including the fatal-error path in main().catch that calls process.exit(1).
+  process.on('exit', stopTunnels);
 }
 
 if (require.main === module) {

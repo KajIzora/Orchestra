@@ -14,6 +14,10 @@
     // Opt-in gate for the MAIN-world stream-body sniffer (S1/S3/S4/S5). Default off; body-reading
     // only happens once the user enables this. Structural fields only — never message content.
     streamSignals: 'taskAppChatWatchStreamSignals',
+    // Separate, stricter opt-in (FollowUps §3.3): stream the assistant's MESSAGE TEXT into Orchestra.
+    // Default off. When on, the sniffer extracts reply text (chatgpt/claude) and the DOM path streams
+    // gemini + posts the final message for every provider. This is the "explicit privacy opt-in".
+    streamBody: 'taskAppChatWatchStreamBody',
   };
   const MAX_BUTTONS = 80;
   const MAX_INPUTS = 20;
@@ -60,13 +64,15 @@
   let debugEnabled = false;
   let sendPromptPreviews = false;
   let streamSignalsEnabled = false;
+  let streamBodyEnabled = false;
 
   // Tell the MAIN-world spoofer whether stream-body sniffing is allowed. The spoofer defaults OFF
-  // and only tees response bodies once it receives this with enabled:true (the privacy gate).
+  // and only tees response bodies once it receives this with enabled:true or bodyEnabled:true (the
+  // privacy gate). `bodyEnabled` additionally unlocks assistant-text extraction (§3.3).
   function pushStreamSniffConfig() {
     try {
       window.dispatchEvent(new CustomEvent('chat-watch-stream-config', {
-        detail: { enabled: !!streamSignalsEnabled },
+        detail: { enabled: !!streamSignalsEnabled, bodyEnabled: !!streamBodyEnabled },
       }));
     } catch (_) {
       /* ignore */
@@ -77,13 +83,14 @@
     debugEnabled = !!stored[STORAGE_KEYS.debug];
     sendPromptPreviews = !!stored[STORAGE_KEYS.sendPromptPreviews];
     streamSignalsEnabled = !!stored[STORAGE_KEYS.streamSignals];
+    streamBodyEnabled = !!stored[STORAGE_KEYS.streamBody];
     pushStreamSniffConfig();
   }
 
   function loadPrivacySettings() {
     try {
       chrome.storage.local.get(
-        [STORAGE_KEYS.debug, STORAGE_KEYS.sendPromptPreviews, STORAGE_KEYS.streamSignals],
+        [STORAGE_KEYS.debug, STORAGE_KEYS.sendPromptPreviews, STORAGE_KEYS.streamSignals, STORAGE_KEYS.streamBody],
         (stored) => {
           if (disposed) return;
           applyPrivacySettings(stored || {});
@@ -146,6 +153,36 @@
   };
 
   window.addEventListener('chat-watch-stream-signal', streamSignalListener);
+
+  // Forward MAIN-world assistant-TEXT snapshots (§3.3 opt-in) to the background worker. Unlike the
+  // structural signal above, this carries model message content — it only ever fires when the
+  // body-streaming opt-in is on (the spoofer gates the dispatch on streamBodyEnabled).
+  const streamBodyListener = (event) => {
+    try {
+      const d = (event && event.detail) || {};
+      chrome.runtime.sendMessage(
+        {
+          type: 'STREAM_BODY',
+          payload: {
+            provider: d.provider || '',
+            conversation_id: d.conversation_id || '',
+            turn_id: d.turn_id || '',
+            text: typeof d.text === 'string' ? d.text : '',
+            final: d.final === true,
+            source: d.source || 'stream',
+            t: typeof d.t === 'number' ? d.t : Date.now(),
+          },
+        },
+        () => {
+          try { void chrome.runtime.lastError; } catch (_) {}
+        }
+      );
+    } catch (err) {
+      handleInvalidatedExtensionContext(err);
+    }
+  };
+
+  window.addEventListener('chat-watch-stream-body', streamBodyListener);
 
   // Relay for the deep-research frame observer (v0.5.15). content-dr-frame.js runs inside the
   // SANDBOXED research-card iframe, whose opaque origin cannot reliably use runtime APIs
@@ -795,6 +832,87 @@
     }
   }
 
+  // ── DOM assistant-text path for the §3.3 opt-in ──
+  // The sniffer (spoofer.js) reconstructs chatgpt/claude reply text from the network stream. The DOM
+  // path here covers (a) gemini streaming (its stream body is not text-parsed) and (b) the FINAL
+  // message for EVERY provider on the generating→idle edge — a reliable done strip even if the
+  // sniffer missed a format. Uncapped read (bounded to MAX_STREAM_BODY_TEXT), opt-in gated.
+  const MAX_STREAM_BODY_TEXT = 8000;
+  const STREAM_BODY_DOM_EMIT_MS = 1500;
+  let lastStreamBodyDomEmitAt = 0;
+  let streamBodyTurnActive = false;
+
+  function rawLastAssistantTextById(providerId) {
+    if (providerId === 'chatgpt' || providerId === 'claude') {
+      const nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
+      if (nodes.length) {
+        const last = nodes[nodes.length - 1];
+        return textOf(last.innerText || last.textContent);
+      }
+    }
+    if (providerId === 'gemini') {
+      const nodes = document.querySelectorAll('message-content, .model-response-text');
+      if (nodes.length) {
+        const last = nodes[nodes.length - 1];
+        return textOf(last.innerText || last.textContent);
+      }
+    }
+    return '';
+  }
+
+  function sendStreamBody(detail) {
+    if (disposed) return;
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: 'STREAM_BODY',
+          payload: {
+            provider: detail.provider || '',
+            conversation_id: detail.conversation_id || '',
+            turn_id: detail.turn_id || '',
+            text: typeof detail.text === 'string' ? detail.text : '',
+            final: detail.final === true,
+            source: detail.source || 'dom',
+            t: Date.now(),
+          },
+        },
+        () => {
+          try { void chrome.runtime.lastError; } catch (err) { handleInvalidatedExtensionContext(err); }
+        }
+      );
+    } catch (err) {
+      if (!handleInvalidatedExtensionContext(err)) throw err;
+    }
+  }
+
+  function handleStreamBody(snapshot) {
+    if (disposed || !streamBodyEnabled) {
+      streamBodyTurnActive = snapshot ? !!snapshot.generating : false;
+      return;
+    }
+    const providerId = snapshot.provider;
+    if (!providerId || providerId === 'unknown') return;
+    const cid = String(snapshot.conversationId || '').trim().toLowerCase();
+    if (snapshot.generating) {
+      streamBodyTurnActive = true;
+      // gemini streams via the DOM (sniffer doesn't parse its body); chatgpt/claude stream via the
+      // sniffer, so we don't double-source their intermediate text here.
+      if (providerId === 'gemini') {
+        const now = Date.now();
+        if (now - lastStreamBodyDomEmitAt >= STREAM_BODY_DOM_EMIT_MS) {
+          lastStreamBodyDomEmitAt = now;
+          const text = rawLastAssistantTextById(providerId).slice(0, MAX_STREAM_BODY_TEXT);
+          if (text) sendStreamBody({ provider: providerId, conversation_id: cid, text, final: false, source: 'dom' });
+        }
+      }
+    } else if (streamBodyTurnActive) {
+      // generating→idle edge: post the FINAL rendered message for every provider (reliable done strip).
+      streamBodyTurnActive = false;
+      const text = rawLastAssistantTextById(providerId).slice(0, MAX_STREAM_BODY_TEXT);
+      if (text) sendStreamBody({ provider: providerId, conversation_id: cid, text, final: true, source: 'dom' });
+    }
+  }
+
   function createSnapshot() {
     const provider = getProvider();
     const rawButtons = Array.from(document.querySelectorAll('button'))
@@ -931,6 +1049,7 @@
     if (disposed) return lastSnapshot;
     const snapshot = createSnapshot();
     scheduleBackgroundSend(snapshot, immediate);
+    handleStreamBody(snapshot);
     const signature = signatureFor(snapshot);
     lastSnapshot = snapshot;
 
@@ -949,6 +1068,7 @@
     if (disposed) return;
 
     const snapshot = createSnapshot();
+    handleStreamBody(snapshot);
     const lastGen = lastSnapshot ? lastSnapshot.generating : false;
     const currentGen = snapshot.generating;
     const lastCid = lastSnapshot ? lastSnapshot.conversationId : '';
@@ -995,7 +1115,8 @@
         if (
           !changes[STORAGE_KEYS.debug] &&
           !changes[STORAGE_KEYS.sendPromptPreviews] &&
-          !changes[STORAGE_KEYS.streamSignals]
+          !changes[STORAGE_KEYS.streamSignals] &&
+          !changes[STORAGE_KEYS.streamBody]
         ) {
           return;
         }
@@ -1012,6 +1133,10 @@
             changes[STORAGE_KEYS.streamSignals] != null
               ? changes[STORAGE_KEYS.streamSignals].newValue
               : streamSignalsEnabled,
+          [STORAGE_KEYS.streamBody]:
+            changes[STORAGE_KEYS.streamBody] != null
+              ? changes[STORAGE_KEYS.streamBody].newValue
+              : streamBodyEnabled,
         });
       });
     } catch (err) {

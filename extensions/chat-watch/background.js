@@ -1396,3 +1396,60 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // async response
 });
 // === end stream-signal fence (v3-browser-signals) ===
+
+// === assistant-text streaming (FollowUps §3.3 — explicit privacy opt-in) ===
+// Unlike STREAM_SIGNAL (structural markers only), STREAM_BODY carries the model's MESSAGE TEXT. It
+// is only ever dispatched by the content/spoofer scripts when the user has turned on the
+// body-streaming opt-in (default OFF). We forward it to the dedicated content endpoint; the server
+// keeps ONE current message per conversation and the live-feed adapter renders it as one evolving
+// note + a final stop. Display-only: never feeds completion/attribution.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== 'STREAM_BODY') return false;
+  const tabId = sender.tab && sender.tab.id;
+  if (!tabId) {
+    sendResponse({ ok: false, error: 'no tab' });
+    return false;
+  }
+  const p = message.payload || {};
+  const provider = p.provider;
+  if (provider !== 'chatgpt' && provider !== 'claude' && provider !== 'gemini') {
+    sendResponse({ ok: false, error: 'unknown provider' });
+    return false;
+  }
+  const conversation_id =
+    (typeof p.conversation_id === 'string' && p.conversation_id.trim()
+      ? p.conversation_id.trim().toLowerCase()
+      : tabStreamConversationId.get(tabId)) || '';
+  const text = typeof p.text === 'string' ? p.text : '';
+  // An empty non-final snapshot carries nothing to show; drop it (a final empty is still meaningful —
+  // it lets the server close the turn even if no text was captured).
+  if (!text && p.final !== true) {
+    sendResponse({ ok: false, error: 'empty' });
+    return false;
+  }
+  (async () => {
+    const creds = await loadCredentials();
+    if (!creds) {
+      sendResponse({ ok: false, error: 'Orchestra not reachable' });
+      return;
+    }
+    await postJson(
+      creds.apiBase,
+      '/api/browser-chats/stream-body',
+      {
+        tab_id: tabId,
+        provider,
+        conversation_id,
+        turn_id: typeof p.turn_id === 'string' ? p.turn_id : '',
+        text,
+        final: p.final === true,
+        source: p.source === 'stream' || p.source === 'dom' ? p.source : 'stream',
+        t: typeof p.t === 'number' ? p.t : Date.now(),
+      },
+      creds.token
+    );
+    sendResponse({ ok: true });
+  })();
+  return true; // async response
+});
+// === end assistant-text streaming fence (§3.3) ===

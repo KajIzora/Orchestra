@@ -20,8 +20,22 @@
   --finished-fg: #1d7a4c;
   --focus-bg: #ffe1c2;
   --focus-fg: #9a4e00;
+  /* Context pill = Indigo, #NOTE/#PROMPT pills = Amber. Derived from the named palette via the
+     color reference's "soft" formula (16% tint bg, 60% ink-mixed fg). Because they mix against
+     --bg-pane / --text-primary, one definition adapts to both light and dark automatically. */
+  --context-bg: color-mix(in srgb, var(--color-indigo) 16%, var(--bg-pane));
+  --context-fg: color-mix(in srgb, var(--color-indigo) 60%, var(--text-primary));
+  --note-bg: color-mix(in srgb, var(--color-amber) 16%, var(--bg-pane));
+  --note-fg: color-mix(in srgb, var(--color-amber) 60%, var(--text-primary));
   --needsinput-bg: rgba(224, 106, 90, 0.16);
   --needsinput-fg: var(--color-coral);
+  /* Needs-input, split by gate kind. Permission (approve an action) keeps the alert coral; question
+     (the agent is asking you) takes a warmer amber so the two read apart at a glance. Both stay in the
+     needs-input family so the row still reads as "your turn". */
+  --needsinput-permission-bg: var(--needsinput-bg);
+  --needsinput-permission-fg: var(--needsinput-fg);
+  --needsinput-question-bg: color-mix(in srgb, var(--color-amber) 18%, var(--bg-pane));
+  --needsinput-question-fg: color-mix(in srgb, var(--color-amber) 72%, var(--text-primary));
   --backlog-bg: rgba(129, 89, 199, 0.2);
   --backlog-fg: #5a3d9a;
   --danger: #b23a3a;
@@ -40,6 +54,14 @@
   --color-orange: #e67e22;
   --color-cyan: #17a2b8;
   --color-slate: #6b7280;
+
+  /* Platform logo tints for the auto-generated agent header. */
+  --plat-claude: #d97757;
+  --plat-codex: #10a37f;
+  --plat-cursor: #23221e;
+  --plat-gemini: #8159c7;
+  --plat-grok: #4d5566;
+  --plat-terminal: #6b675e;
 
   --radius-sm: 4px;
   --radius-md: 8px;
@@ -72,11 +94,20 @@
     --finished-fg: #86d6a6;
     --focus-bg: #4a3318;
     --focus-fg: #f2b673;
+    /* --context-bg/-fg and --note-bg/-fg intentionally omitted here: their color-mix definitions
+       in :root already re-resolve against the dark --bg-pane / --text-primary above. */
     --needsinput-bg: rgba(224, 106, 90, 0.22);
     --needsinput-fg: var(--color-coral);
+    --needsinput-permission-bg: var(--needsinput-bg);
+    --needsinput-permission-fg: var(--needsinput-fg);
+    --needsinput-question-bg: color-mix(in srgb, var(--color-amber) 24%, var(--bg-pane));
+    --needsinput-question-fg: color-mix(in srgb, var(--color-amber) 78%, var(--text-primary));
     --backlog-bg: rgba(196, 168, 240, 0.22);
     --backlog-fg: #d8c8fa;
     --danger: #e07474;
+    /* Cursor's mark is near-black; lift it on the dark pane so it stays visible. */
+    --plat-cursor: #ecebe5;
+    --plat-grok: #aeb6c6;
     color-scheme: dark;
   }
 }
@@ -102,7 +133,8 @@ button {
   cursor: pointer;
 }
 
-input[type="text"] {
+input[type="text"],
+textarea {
   font: inherit;
   color: inherit;
   background: var(--bg-pane);
@@ -113,21 +145,78 @@ input[type="text"] {
   width: 100%;
 }
 
-input[type="text"]:focus {
+input[type="text"]:focus,
+textarea:focus {
   border-color: var(--text-secondary);
 }
 
+/* Registered so the grid track AND the centered column's margin animate together as one
+   value when the sidebar opens/closes (plain custom properties don't interpolate). */
+@property --sidebar-w {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 280px;
+}
+
 .app {
+  /* --sidebar-w-open = the user's chosen open width (drag-resizable, persisted by JS).
+     --sidebar-w     = the *effective* track width; collapses to 44px when hidden. */
+  --sidebar-w-open: 280px;
+  --sidebar-w: var(--sidebar-w-open);
+  --col-w: 720px;
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: var(--sidebar-w) 1fr;
   height: 100vh;
-  max-width: 1200px;
+  max-width: 1700px;
   margin: 0 auto;
-  transition: grid-template-columns 0.18s ease;
+  position: relative;
+  transition: --sidebar-w 0.18s ease;
 }
 
 .app.projects-sidebar-hidden {
-  grid-template-columns: 44px 1fr;
+  --sidebar-w: 44px;
+}
+
+/* Live drag: track the cursor 1:1 (no easing) and don't select text under the pointer. */
+.app.sidebar-resizing {
+  transition: none;
+  user-select: none;
+  cursor: col-resize;
+}
+
+/* Draggable divider sitting on the sidebar/pane seam. Follows --sidebar-w, so it rides
+   along during the open/close animation and tracks the cursor while dragging. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sidebar-w);
+  width: 10px;
+  transform: translateX(-50%);
+  cursor: col-resize;
+  z-index: 5;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.sidebar-resizer:hover::after,
+.app.sidebar-resizing .sidebar-resizer::after {
+  background: var(--border-strong);
+}
+
+/* No resize handle when the sidebar is collapsed to its rail. */
+.app.projects-sidebar-hidden .sidebar-resizer {
+  display: none;
 }
 
 /* Sidebar */
@@ -528,6 +617,7 @@ input[type="text"]:focus {
 }
 
 .workspace-item-fields input:not([type='checkbox']),
+.workspace-item-fields textarea,
 .workspace-item-fields select {
   flex: 1 1 12rem;
   min-width: 10rem;
@@ -546,8 +636,33 @@ input[type="text"]:focus {
   user-select: none;
 }
 
-.workspace-command-details input {
+.workspace-command-details input,
+.workspace-command-details textarea {
   margin-top: 6px;
+}
+
+.workspace-command-input-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.workspace-command-input-row textarea {
+  min-height: 34px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.workspace-command-advanced {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 6px;
+  padding: 7px 9px;
+  font-size: 12px;
+  text-align: center;
 }
 
 .workspace-checkbox-label {
@@ -740,7 +855,8 @@ input[type="text"]:focus {
 /* Pane */
 
 .pane {
-  background: var(--bg-pane);
+  background: var(--bg-sidebar);     /* off-white gutters */
+  align-items: center;               /* center the column */
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -757,7 +873,15 @@ input[type="text"]:focus {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 24px 32px 0;
+  padding: 18px 24px 0;
+  width: 100%;
+  max-width: var(--col-w);           /* the reading column */
+  /* Hold a fixed, window-centered position: the margin keeps the column centered in the whole
+     app regardless of sidebar width, so opening the sidebar does NOT shift it — until the
+     sidebar would overlap it, at which point max(0px, …) clamps and the column slides over. */
+  align-self: flex-start;
+  margin-left: max(0px, calc(50% - var(--col-w) / 2 - var(--sidebar-w) / 2));
+  background: var(--bg-pane);         /* white column on off-white pane */
   overflow: hidden;
 }
 
@@ -768,27 +892,13 @@ input[type="text"]:focus {
   gap: 16px;
 }
 
-.pane-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.pane-actions .pane-action-btn {
-  width: auto;
-  flex-shrink: 0;
-  white-space: nowrap;
-  text-align: center;
-}
-
 .pane-title {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   min-width: 0;
+  flex: 1 1 auto; /* fill the header so the trailing button's margin-left:auto can push it right */
 }
 
 .pane-title h2 {
@@ -798,6 +908,19 @@ input[type="text"]:focus {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* The header action buttons (Edit, Delete, Hide all progress, Show/Hide Backlog, Open Workspace)
+   all share the plain-text .icon-button look and never shrink below their label. */
+.pane-title .icon-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Push the trailing header button (Open Workspace) to the right edge of the pane title. */
+.pane-title .pane-header-end {
+  margin-left: auto;
 }
 
 .icon-button {
@@ -817,17 +940,7 @@ input[type="text"]:focus {
 }
 
 .project-task-summary-pane {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0 0 18px;
-}
-
-.project-task-summary-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin: 0;
+  margin: 0 0 12px;
 }
 
 .project-task-summary-display {
@@ -887,6 +1000,74 @@ input[type="text"]:focus {
   display: none;
 }
 
+/* Hidden task: collapse the whole monitor-group so the first remaining pill (focus) lands exactly
+   in the state pill's old slot instead of sliding inward toward the text (its children are already
+   display:none above, so the group would otherwise leave a phantom gap). */
+.task-item.task-progress-hidden .monitor-group {
+  display: none;
+}
+
+/* Two row treatments, kept apart so they never read as the same thing: progress-hidden is a flat
+   gray OVERLAY (no bar); selection is a gray left BAR (no fill). A row can be both at once. */
+.task-item.task-progress-hidden {
+  background: rgba(35, 34, 30, 0.05);
+  transition: background 0.2s, box-shadow 0.2s;
+}
+
+@media (prefers-color-scheme: dark) {
+  .task-item.task-progress-hidden {
+    background: rgba(255, 255, 255, 0.05);
+  }
+}
+
+/* Selected row: a gray left bar only (no fill). Coexists with the live blue text tint and with the
+   progress-hidden overlay. Triggered from the row (clicking the text edits instead). */
+.task-item.task-selected {
+  box-shadow: inset 3px 0 0 rgba(35, 34, 30, 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  .task-item.task-selected {
+    box-shadow: inset 3px 0 0 rgba(255, 255, 255, 0.45);
+  }
+}
+
+/* Right-click row menu — a small floating 2-item menu (Hide/Show progress, Delete task). */
+.task-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 156px;
+  padding: 4px;
+  background: var(--bg-pane);
+  border: 0.5px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.task-context-menu-item {
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.task-context-menu-item:hover {
+  background: var(--hover);
+}
+
+.task-context-menu-item.danger {
+  color: var(--danger);
+}
+
 .task-list {
   list-style: none;
   margin: 0;
@@ -900,8 +1081,10 @@ input[type="text"]:focus {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
-  padding: 10px 6px 8px;
+  /* The only stacked children are the agent header + the task row; the header owns the gap
+     between them via its own margin-bottom, so no column gap here. */
+  gap: 0;
+  padding: 9px 6px 8px;
   border-bottom: 0.5px solid var(--border);
   position: relative;
 }
@@ -913,15 +1096,92 @@ input[type="text"]:focus {
   min-width: 0;
 }
 
-.task-item-pills {
+/* Left icon column: delete ×, drag ⋮⋮, hide eye, checkbox. Same spacing/alignment they had as
+   direct children of the row; wrapped so hovering this section is what reveals the ×/⋮⋮/eye. */
+.task-gutter {
   display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.task-item-pills {
+  /* Rides on the right of the text row. Extra pills (focus/backlog/stuck) flow to the left;
+     the working pill + its controls travel together as one column on the right. */
+  display: flex;
+  flex-direction: row;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: flex-start;
   gap: 6px 8px;
   min-width: 0;
-  /* Align with task text (after drag handle + checkbox + gaps). */
-  padding-left: calc(14px + 10px + 16px + 10px);
+  flex: 0 0 auto;
+  max-width: none;
   box-sizing: border-box;
+  /* Sit just after the text; pull the cluster off the scrollbar edge so it lines up with the "+ Add task" monitor button. */
+  margin-left: 12px;
+  margin-right: 6px;
+  position: relative;
+  z-index: 2;
+}
+/* The working/status pill with clear × centered below it. × is hover-only and floats
+   (absolute) so it never shifts the pill. Progress is hidden via ⌘-click on the pill;
+   a "show" pill (same size/padding as the other pills) replaces it until clicked. */
+.monitor-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+/* The clear × is invisible until the pointer is anywhere over the pill or the × beneath it — the
+   reveal box is the full rectangle from the pill's top-left to the bottom of the ×. */
+.monitor-group .cursor-unlink {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.monitor-group:hover .cursor-unlink {
+  opacity: 1;
+}
+/* When a working pill is present: clear × sits just below it, spanning the pill's full width so the
+   whole rectangle under the pill is the reveal/click zone. */
+.monitor-group.has-working .cursor-unlink {
+  position: absolute;
+  white-space: nowrap;
+  top: calc(100% - 1px);
+  left: 0;
+  right: 0;
+  text-align: center;
+}
+
+/* focus / stuck / backlog: a pill with a clear × below it. The × reveals whenever the pointer is
+   anywhere over the pill or the × beneath it (the full rectangle from pill top to × bottom), and
+   the × spans the pill's full width so that whole strip is the reveal/click zone. */
+.pill-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.pill-clear {
+  position: absolute;
+  top: calc(100% - 1px);
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+  padding: 0 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+.pill-group:hover .pill-clear {
+  opacity: 1;
+}
+.pill-clear:hover {
+  color: var(--danger);
 }
 
 .task-item.done .task-text {
@@ -940,13 +1200,51 @@ input[type="text"]:focus {
   user-select: none;
 }
 
-.task-item:hover .task-drag {
+/* Gutter eye — the hide/show toggle in the left column, between the drag handle and checkbox.
+   Hidden until list-hover; stays faintly visible while the task is muted so it doubles as "show". */
+.task-hide {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px; /* line up with the checkbox on the first text line */
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.task-hide svg {
+  width: 14px;
+  height: 14px;
+}
+
+.task-hide:hover {
+  color: var(--text-primary);
+}
+
+/* While hidden, the eye stays faintly visible even without hover — it's the "show" affordance. */
+.task-item.task-progress-hidden .task-hide {
+  opacity: 0.6;
+}
+
+/* The ×/⋮⋮/eye reveal only while the pointer is over this row's gutter, and only for that row.
+   Placed after the hidden-eye rule so hover wins over the faint-eye opacity. */
+.task-gutter:hover .task-drag,
+.task-gutter:hover .task-delete,
+.task-gutter:hover .task-hide {
   opacity: 1;
 }
 
 .task-check {
   width: 16px;
   height: 16px;
+  margin-top: 2px; /* centre the square on the first line (line-height 1.45) */
   border-radius: var(--radius-sm);
   border: 1.5px solid var(--border-strong);
   background: transparent;
@@ -982,7 +1280,7 @@ input[type="text"]:focus {
 }
 
 .task-text {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -992,7 +1290,6 @@ input[type="text"]:focus {
 .task-text-input {
   flex: 1;
   min-width: 0;
-  width: 100%;
   background: var(--bg-sidebar);
   border: 0.5px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -1002,6 +1299,8 @@ input[type="text"]:focus {
   outline: none;
   box-sizing: border-box;
   line-height: 1.4;
+  position: relative;
+  z-index: 0;
 }
 
 .task-item textarea.task-text-input {
@@ -1011,25 +1310,12 @@ input[type="text"]:focus {
 }
 
 .pill {
-  font-size: 11px;
-  font-weight: 500;
-  padding: 2px 7px;
-  border-radius: 10px;
-  white-space: nowrap;
-  letter-spacing: 0.02em;
-}
-
-.pill.task-progress {
-  background: var(--bg-sidebar);
-  color: var(--text-secondary);
   font-size: 10px;
   font-weight: 500;
-  letter-spacing: 0.01em;
-  text-transform: none;
-  max-width: 8.5rem;
-  line-height: 1.25;
-  white-space: normal;
-  text-align: center;
+  padding: 2px 6px;
+  border-radius: 9px;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
 }
 
 .pill.task-focus {
@@ -1057,6 +1343,18 @@ input[type="text"]:focus {
   color: var(--needsinput-fg);
 }
 
+/* Gate-kind variants. They layer on the base .needsinput class (so hidden-state selectors + roll-up
+   still match) and only override the tint. Absent/unknown keeps the generic coral above. */
+.pill.needsinput-permission {
+  background: var(--needsinput-permission-bg);
+  color: var(--needsinput-permission-fg);
+}
+
+.pill.needsinput-question {
+  background: var(--needsinput-question-bg);
+  color: var(--needsinput-question-fg);
+}
+
 .pill.waiting {
   background: var(--waiting-bg);
   color: var(--waiting-fg);
@@ -1068,14 +1366,25 @@ input[type="text"]:focus {
 }
 
 .pill-icon {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
   flex-shrink: 0;
 }
 
 .pill.backlog {
   background: var(--backlog-bg);
   color: var(--backlog-fg);
+}
+
+.pill.backlog.off {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  opacity: 0.6;
+}
+
+.pill.backlog.off:hover {
+  opacity: 1;
 }
 
 .pill-toggle {
@@ -1114,7 +1423,6 @@ input[type="text"]:focus {
 }
 
 .task-item:hover .task-focus-edit,
-.task-item:hover .task-delete,
 .task-focus-edit:focus-visible,
 .task-delete:focus-visible {
   opacity: 1;
@@ -1125,21 +1433,54 @@ input[type="text"]:focus {
   background: var(--hover);
 }
 
+/* Delete × is invisible until you hover exactly over it. */
 .task-delete:hover {
+  opacity: 1;
   color: var(--danger);
   background: var(--hover);
 }
 
+/* Delete × parked at the very left of the task row, left of the drag handle. */
+.task-delete-lead {
+  width: 14px;
+  padding: 0;
+  text-align: center;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.pane-footer {
+  order: 11;
+  position: relative;
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 2px 6px 12px;
+}
+
 .new-task-form {
-  padding: 12px 8px;
-  border-top: 0.5px solid var(--border);
+  order: 10;
+  padding: 8px 8px 4px;
   margin-top: auto;
+  border-top: 0.5px solid var(--border);
+}
+
+.new-task-form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 8px;
 }
 
 .new-task-form input,
 .new-task-form textarea {
   display: block;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  width: auto;
   margin: 0;
   border: none;
   background: transparent;
@@ -1157,14 +1498,22 @@ input[type="text"]:focus {
   color: var(--text-muted);
 }
 
-.pane-footer {
-  position: relative;
+.new-task-form-actions {
   display: flex;
   align-items: center;
-  font-size: 12px;
-  color: var(--text-muted);
-  padding: 8px 6px 16px;
-  border-top: 0.5px solid var(--border);
+  flex-shrink: 0;
+  padding: 0 2px 0 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.new-task-form-row:hover .new-task-form-actions {
+  opacity: 1;
+}
+
+/* Keep monitor button visible on existing tasks */
+.task-item .new-task-form-actions {
+  opacity: 1;
 }
 
 /* Toast */
@@ -1339,9 +1688,26 @@ input[type="text"]:focus {
 
 .watch-source-choices {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(6, minmax(max-content, 1fr));
+  gap: 6px;
   margin-bottom: 10px;
+  overflow-x: auto;
+}
+.watch-source-choices .ghost-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding-inline: 8px;
+  white-space: nowrap;
+}
+.watch-source-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  pointer-events: none;
+  opacity: 0.85;
 }
 
 .watch-source-choices .ghost-button.active {
@@ -1406,6 +1772,76 @@ input[type="text"]:focus {
   max-width: 620px;
 }
 
+.shell-command-modal {
+  width: min(900px, calc(100vw - 48px));
+  max-width: 900px;
+  max-height: min(88vh, calc(100dvh - 48px), 720px);
+  overflow: hidden;
+}
+
+.shell-editor {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 360px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sidebar);
+  overflow: hidden;
+}
+
+.shell-editor-highlight,
+.shell-editor-textarea {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 12px;
+  border: 0;
+  border-radius: 0;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.shell-editor-highlight {
+  color: var(--text-primary);
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.shell-editor-textarea {
+  color: transparent;
+  caret-color: var(--text-primary);
+  background: transparent;
+  resize: none;
+  outline: none;
+  overflow: auto;
+}
+
+.shell-editor-textarea::selection {
+  color: transparent;
+  background: var(--selected);
+}
+
+.bash-comment {
+  color: var(--text-muted);
+}
+
+.bash-string {
+  color: var(--color-emerald);
+}
+
+.bash-keyword {
+  color: var(--color-magenta);
+}
+
+.bash-variable {
+  color: var(--color-blue);
+}
+
+.bash-command {
+  color: var(--color-coral);
+}
+
 .launch-preset-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1446,6 +1882,52 @@ input[type="text"]:focus {
   color: var(--text-primary);
 }
 
+.add-title-modal .field-label {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.add-title-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-pane);
+  color: var(--text-primary);
+}
+
+/* "Add Header" modal — Platform picker: a row of small square icon toggles (CLI / Desktop /
+   Plugin). One active at a time; the active one takes the app's purple accent. */
+.platform-picker {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.platform-pick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 34px;
+  padding: 0;
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-pane);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.platform-pick:hover {
+  background: var(--hover);
+  color: var(--text-primary);
+}
+.platform-pick.active {
+  background: var(--color-purple);
+  border-color: var(--color-purple);
+  color: #fff;
+}
+
 .cursor-run-list {
   list-style: none;
   margin: 0;
@@ -1474,6 +1956,363 @@ input[type="text"]:focus {
   font-size: 13px;
   color: var(--text-primary);
   border-radius: 0;
+}
+
+/* ============================================================= */
+/* Custom UI: rich task text, title section, stuck/blocker links */
+/* ============================================================= */
+
+/* --- Rich task text (per-line rendering) --- */
+.task-text-rich {
+  display: block;
+}
+.task-line {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+  min-height: 1.2em;
+  border-radius: var(--radius-sm);
+}
+/* First line of the task body = "what's being worked on now". No tint when idle; agent state
+   tints the whole line (this is where the monitor pill aligns). */
+.task-line-current {
+  padding: 1px 6px;
+  margin: -1px -6px 2px;
+  border-radius: var(--radius-sm);
+}
+.task-line-current.fl-working {
+  background: color-mix(in srgb, var(--color-blue) 12%, transparent);
+}
+.task-line-current.fl-done {
+  background: color-mix(in srgb, var(--color-emerald) 14%, transparent);
+}
+.task-line-current.fl-needsinput {
+  background: color-mix(in srgb, var(--color-coral) 15%, transparent);
+}
+.task-line-current.fl-waiting {
+  background: color-mix(in srgb, var(--color-amber) 15%, transparent);
+}
+/* When the first-line (highlight) bar carries a note/prompt pill, vertically centre the row within
+   that bar (flex align-items is true-centre, unlike vertical-align) while keeping it left-aligned. */
+.task-line-current:has(.tl-prompt) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+/* A line that starts with [ ] / [x] lays out as a flex row so the circle centres with the text. */
+.task-line.tl-line-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.tl-check {
+  width: 15px;
+  height: 15px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--bg-pane);
+  cursor: pointer;
+  flex-shrink: 0;
+  position: relative;
+  padding: 0;
+}
+.tl-check:hover {
+  border-color: var(--color-purple);
+}
+.tl-check.checked {
+  /* Faded tint fill, matching the pill/line-highlight colours; small saturated check inside. */
+  background: color-mix(in srgb, var(--color-purple) 20%, transparent);
+  border-color: var(--color-purple);
+}
+.tl-check.checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2.5px;
+  width: 2.5px;
+  height: 5.5px;
+  border: solid var(--color-purple);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+.tl-checktext.checked {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+/* Inline #NOTE / #PROMPT button — pastel yellow, smaller than the other pills. */
+.tl-prompt {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 1px 5px;
+  margin: 0 2px;
+  border-radius: 8px;
+  border: 0.5px solid color-mix(in srgb, var(--note-fg) 20%, transparent);
+  background: var(--note-bg);
+  color: var(--note-fg);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.tl-prompt:hover {
+  background: color-mix(in srgb, var(--note-fg) 14%, var(--note-bg));
+}
+/* On a [ ] checkbox line the pill sits inline inside .tl-checktext, so it centres on the text's
+   x-height (vertical-align: middle) instead of the line box — parking it ~1.5px low. A pill on a
+   plain first line flex-centres and looks right; nudge the checkbox one up to match it. */
+.tl-line-check .tl-prompt {
+  position: relative;
+  top: -1.5px;
+}
+
+/* Inline LaTeX */
+.tl-latex .katex {
+  font-size: 1em;
+}
+
+/* Prompt popover */
+.prompt-popover {
+  position: fixed;
+  z-index: 1200;
+  width: auto;
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  background: var(--bg-pane);
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-toast);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prompt-popover-header {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  cursor: move;
+  user-select: none;
+  padding-bottom: 4px;
+  border-bottom: 0.5px solid var(--border);
+}
+.prompt-popover-text {
+  width: 420px;
+  min-width: 220px;
+  min-height: 84px;
+  max-width: 90vw;
+  resize: both;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  background: var(--bg-app);
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  outline: none;
+}
+.prompt-popover-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.prompt-popover-btn {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.prompt-popover-btn:hover {
+  background: var(--hover);
+}
+.prompt-popover-btn.primary {
+  background: var(--color-purple);
+  border-color: var(--color-purple);
+  color: #fff;
+}
+
+/* --- Auto-generated agent header: one clean line above a tracked task --- */
+.task-agent-hdr {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 7px;
+  min-width: 0;
+}
+/* A 14px drag spacer + the 16px logo cell reproduce the task row's leading columns
+   (drag 14 · checkbox 16) so the logo lands directly over the checkbox and the title over the
+   task text. */
+.task-agent-hdr .hdr-drag {
+  flex: none;
+  width: 14px;
+}
+.task-agent-hdr .hdr-logo {
+  flex: none;
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.task-agent-hdr .hdr-logo svg,
+.task-agent-hdr .hdr-loc svg {
+  display: block;
+}
+.task-agent-hdr .hdr-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 60px;
+  flex-shrink: 1;
+}
+/* Terminal-process rows show the command in monospace. */
+.task-agent-hdr .hdr-title.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13.5px;
+}
+.task-agent-hdr .hdr-plat {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.task-agent-hdr .hdr-loc {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.task-agent-hdr .hdr-folder {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  font: 12px ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: nowrap;
+}
+/* Browser chats have no folder — a lighter, italic "browser chat" label instead. */
+.task-agent-hdr .hdr-folder.browser {
+  font-family: inherit;
+  font-style: italic;
+  color: #b8b2a8;
+}
+.task-agent-hdr .hdr-dot {
+  flex: none;
+  color: #cfc9bf;
+}
+
+/* --- Stuck pill + blocker links --- */
+.pill.stuck {
+  background: color-mix(in srgb, var(--color-coral) 18%, transparent);
+  color: var(--color-coral);
+  cursor: pointer;
+  user-select: none;
+}
+.pill.stuck.off {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  opacity: 0.6;
+}
+.pill.stuck.off:hover {
+  opacity: 1;
+}
+.pill.stuck:not(.off) {
+  cursor: grab;
+}
+.task-item.is-stuck {
+  background: color-mix(in srgb, var(--color-coral) 5%, transparent);
+}
+.task-item.blocker-target {
+  box-shadow: inset 0 0 0 2px var(--color-coral);
+  border-radius: var(--radius-sm);
+}
+body.blocker-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+#blocker-lines {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  /* Above the task list but below modals/overlays (.modal-overlay is 200) so the stuck arrow
+     never draws over the monitor modal or its tabs. */
+  z-index: 150;
+  color: var(--color-coral);
+  overflow: visible;
+}
+.bl-line {
+  stroke: var(--color-coral);
+  stroke-width: 2;
+}
+.bl-line.persist {
+  stroke-dasharray: 5 4;
+  opacity: 0.75;
+}
+.bl-line.temp {
+  stroke-dasharray: 3 3;
+  opacity: 0.9;
+}
+
+/* Chat title inside a picker row */
+.row-chat-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-purple);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-chat-title::before {
+  content: '❝ ';
+  opacity: 0.6;
+}
+
+/* Monitor-modal toggle buttons (Stuck / Backlog) — active when the state is on. */
+.modal-toggle.active {
+  background: var(--color-purple);
+  border-color: var(--color-purple);
+  color: #fff;
+}
+#cursor-wait-stuck.active {
+  background: var(--color-coral);
+  border-color: var(--color-coral);
+  color: #fff;
+}
+/* Focus is always shown; orange "active" means it has focus targets set (editable). */
+#cursor-wait-focus.active {
+  background: var(--color-orange);
+  border-color: var(--color-orange);
+  color: #fff;
+}
+/* "Waiting" glows yellow while the task is a manual wait. */
+#cursor-wait-manual.active {
+  background: var(--color-amber);
+  border-color: var(--color-amber);
+  color: #fff;
+}
+/* "Context" glows indigo once the task has a note written. */
+#cursor-wait-context.active {
+  background: var(--color-indigo);
+  border-color: var(--color-indigo);
+  color: #fff;
 }
 
 .cursor-run-row .row-title {
@@ -1517,6 +2356,16 @@ input[type="text"]:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Inline platform / surface glyphs in the meta line — kept vertically centered with the muted
+   text and inheriting its color so they read as quiet provenance, not controls. */
+.cursor-run-row .row-meta-icon {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+.cursor-run-row .row-meta-icon svg {
+  display: block;
+}
 
 .cursor-run-row:hover {
   background: var(--hover);
@@ -1528,7 +2377,7 @@ input[type="text"]:focus {
   flex: 0 0 auto;
   gap: 8px;
   margin-top: 14px;
-  justify-content: flex-end;
+  justify-content: center;
 }
 
 .modal-actions .ghost-button {
@@ -1573,4 +2422,135 @@ input[type="text"]:focus {
 
 .sortable-chosen {
   background: var(--hover);
+}
+
+/* --- Context note: a "where I left off" page you write for yourself, per task. --- */
+
+/* The pill on the task row. It only renders once a note exists (you add one from the monitor
+   menu's "Context" button), so it's a persistent, glanceable indigo "this task has context"
+   badge you can click to reopen the note. */
+.pill.task-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--context-bg);
+  color: var(--context-fg);
+  border-color: transparent;
+}
+
+/* The modal is a touch wider and taller than the default so a note has room to breathe. */
+.context-note-modal {
+  max-width: 600px;
+  max-height: min(82vh, calc(100dvh - 48px), 640px);
+}
+.context-note-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.context-note-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reading view (rendered markdown) and the editing textarea share the same box so toggling
+   between them doesn't shift the layout. Both grow to fill the modal and scroll internally. */
+.context-note-view,
+.context-note-textarea {
+  flex: 1 1 auto;
+  min-height: 180px;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-y: auto;
+}
+.context-note-view {
+  cursor: text;
+  word-break: break-word;
+}
+.context-note-textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+  background: var(--bg-pane);
+}
+.context-note-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Rendered markdown elements inside the note. Tuned to sit calmly inside the modal, not to shout. */
+.context-note-h {
+  margin: 14px 0 6px;
+  line-height: 1.3;
+  font-weight: 650;
+}
+.context-note-view > .context-note-h:first-child {
+  margin-top: 0;
+}
+.context-note-h1 {
+  font-size: 16px;
+}
+.context-note-h2 {
+  font-size: 14px;
+}
+.context-note-h3 {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.context-note-p {
+  margin: 6px 0;
+}
+.context-note-ul,
+.context-note-ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+.context-note-ul li,
+.context-note-ol li {
+  margin: 2px 0;
+}
+.context-note-quote {
+  margin: 8px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+.context-note-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--hover);
+}
+.context-note-pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--hover);
+  overflow-x: auto;
+}
+.context-note-pre code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
+.context-note-link {
+  color: var(--context-fg);
+  text-decoration: underline;
+}
+.context-note-hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 0.5px solid var(--border);
 }
